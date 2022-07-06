@@ -58,7 +58,7 @@ pub(crate) struct Progress {
 }
 
 #[derive(Copy, Clone, Default, Debug, PartialEq)]
-pub(crate) struct ProfileInfo {
+pub struct ProfileInfo {
     pub rows: u64,
     pub bytes: u64,
     pub blocks: u64,

@@ -1,4 +1,6 @@
 use std::{marker::PhantomData, sync::Arc};
+use std::pin::Pin;
+use futures_core::Stream;
 use futures_util::stream::BoxStream;
 use futures_util::{
     future,
@@ -7,15 +9,11 @@ use futures_util::{
 };
 use log::info;
 
-use crate::{
-    try_opt,
-    errors::Result,
-    types::{
-        block::BlockRef, query_result::stream_blocks::BlockStream, Block, Cmd, Complex, Query, Row,
-        Rows, Simple,
-    },
-    with_timeout, ClientHandle,
-};
+use crate::{try_opt, errors::Result, types::{
+    block::BlockRef, query_result::stream_blocks::BlockStream, Block, Cmd, Complex, Query, Row,
+    Rows, Simple,
+}, with_timeout, ClientHandle, Error};
+
 
 pub(crate) mod stream_blocks;
 
@@ -32,8 +30,10 @@ impl<'a> QueryResult<'a> {
 
         with_timeout(
             async {
-                let blocks = self
-                    .stream_blocks_(false)
+                let stream = self
+                    .stream_blocks_(false);
+
+                let blocks = stream
                     .try_fold(Vec::new(), |mut blocks, block| {
                         if !block.is_empty() {
                             blocks.push(block);
@@ -41,6 +41,7 @@ impl<'a> QueryResult<'a> {
                         future::ready(Ok(blocks))
                     })
                     .await?;
+
                 Ok(Block::concat(blocks.as_slice()))
             },
             timeout,
@@ -94,8 +95,11 @@ impl<'a> QueryResult<'a> {
                 let inner = c.inner.take().unwrap().call(Cmd::SendQuery(query, context));
 
                 BlockStream::<'a>::new(c, inner, skip_first_block)
+
             })
     }
+
+
 
     /// Method that produces a stream of rows
     pub fn stream(self) -> BoxStream<'a, Result<Row<'static, Simple>>> {

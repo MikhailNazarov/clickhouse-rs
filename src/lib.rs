@@ -130,6 +130,7 @@ pub use crate::{
     pool::Pool,
     types::{block::Block, Options},
 };
+use crate::types::ProfileInfo;
 
 mod binary;
 mod client_info;
@@ -238,6 +239,17 @@ pub struct ClientHandle {
     inner: Option<ClickhouseTransport>,
     context: Context,
     pool: PoolBinding,
+    profile: Option<ProfileInfo>
+}
+
+impl ClientHandle {
+    pub(crate) fn set_profile_info(&mut self, profile: ProfileInfo) {
+        self.profile = Some(profile);
+    }
+
+    pub fn get_profile_info(&self)->Option<ProfileInfo>{
+        self.profile
+    }
 }
 
 impl fmt::Debug for ClientHandle {
@@ -288,6 +300,7 @@ impl Client {
                         None => PoolBinding::None,
                         Some(p) => PoolBinding::Detached(p),
                     },
+                    profile: None
                 };
 
                 handle.hello().await?;

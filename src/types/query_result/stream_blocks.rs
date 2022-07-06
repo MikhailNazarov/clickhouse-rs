@@ -12,6 +12,7 @@ use crate::{
     types::{Block, Packet},
     ClientHandle,
 };
+use crate::types::ProfileInfo;
 
 pub(crate) struct BlockStream<'a> {
     client: &'a mut ClientHandle,
@@ -75,7 +76,11 @@ impl<'a> Stream for BlockStream<'a> {
                     }
                     self.eof = true;
                 }
-                Packet::ProfileInfo(_) | Packet::Progress(_) => {}
+                Packet::ProfileInfo(profile_info) =>{
+                    self.client.set_profile_info(profile_info);
+                    //return Poll::Ready(Some(Ok(BlockStreamItem::ProfileInfo(profile_info))));
+                },
+                Packet::Progress(_) => {}
                 Packet::Exception(exception) => {
                     self.eof = true;
                     return Poll::Ready(Some(Err(Error::Server(exception))))

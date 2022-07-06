@@ -278,6 +278,7 @@ impl Drop for ClientHandle {
                 inner: Some(inner),
                 pool: pool.clone(),
                 context,
+                profile:None,
             };
             pool.return_conn(client);
         }
