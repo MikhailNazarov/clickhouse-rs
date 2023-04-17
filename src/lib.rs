@@ -143,6 +143,7 @@ pub mod pool;
 mod retry_guard;
 /// Clickhouse types.
 pub mod types;
+pub mod sql;
 
 /// This macro is a convenient way to pass row into a block.
 ///
