@@ -1,42 +1,45 @@
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::{
-    convert, fmt, mem,
+    collections::HashMap,
+    convert, fmt,
+    hash::{Hash, Hasher},
+    mem,
     net::{Ipv4Addr, Ipv6Addr},
     str,
     sync::Arc,
 };
 
-use chrono::prelude::*;
+use chrono::{prelude::*, Duration};
 use chrono_tz::Tz;
 use either::Either;
+use uuid::Uuid;
 
 use crate::types::{
-    column::datetime64::to_datetime,
+    column::datetime64::{to_datetime, DEFAULT_TZ},
     decimal::{Decimal, NoBits},
     DateConverter, DateTimeType, Enum16, Enum8, HasSqlType, SqlType,
 };
 
-use uuid::Uuid;
-
 pub(crate) type AppDateTime = DateTime<Tz>;
-pub(crate) type AppDate = Date<Tz>;
+pub(crate) type AppDate = NaiveDate;
 
 /// Client side representation of a value of Clickhouse column.
 #[derive(Clone, Debug)]
 pub enum Value {
+    Bool(bool),
     UInt8(u8),
     UInt16(u16),
     UInt32(u32),
     UInt64(u64),
+    UInt128(u128),
     Int8(i8),
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Int128(i128),
     String(Arc<Vec<u8>>),
     Float32(f32),
     Float64(f64),
-    Date(u16, Tz),
+    Date(u16),
     DateTime(u32, Tz),
     DateTime64(i64, (u32, Tz)),
     ChronoDateTime(DateTime<Tz>),
@@ -63,10 +66,15 @@ impl Hash for Value {
             Self::Int16(i) => i.hash(state),
             Self::Int32(i) => i.hash(state),
             Self::Int64(i) => i.hash(state),
+            Self::Int128(i) => i.hash(state),
             Self::UInt8(i) => i.hash(state),
             Self::UInt16(i) => i.hash(state),
             Self::UInt32(i) => i.hash(state),
             Self::UInt64(i) => i.hash(state),
+            Self::UInt128(i) => i.hash(state),
+            Self::Date(d) => d.hash(state),
+            Self::DateTime(t, _) => t.hash(state),
+            Self::DateTime64(t, (prec_a, _)) => (*t, *prec_a).hash(state),
             _ => unimplemented!(),
         }
     }
@@ -77,25 +85,24 @@ impl Eq for Value {}
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Value::Bool(a), Value::Bool(b)) => *a == *b,
             (Value::UInt8(a), Value::UInt8(b)) => *a == *b,
             (Value::UInt16(a), Value::UInt16(b)) => *a == *b,
             (Value::UInt32(a), Value::UInt32(b)) => *a == *b,
             (Value::UInt64(a), Value::UInt64(b)) => *a == *b,
+            (Value::UInt128(a), Value::UInt128(b)) => *a == *b,
             (Value::Int8(a), Value::Int8(b)) => *a == *b,
             (Value::Int16(a), Value::Int16(b)) => *a == *b,
             (Value::Int32(a), Value::Int32(b)) => *a == *b,
             (Value::Int64(a), Value::Int64(b)) => *a == *b,
+            (Value::Int128(a), Value::Int128(b)) => *a == *b,
             (Value::String(a), Value::String(b)) => *a == *b,
             (Value::Float32(a), Value::Float32(b)) => *a == *b,
             (Value::Float64(a), Value::Float64(b)) => *a == *b,
-            (Value::Date(a, tz_a), Value::Date(b, tz_b)) => {
-                let time_a = tz_a.timestamp(i64::from(*a) * 24 * 3600, 0);
-                let time_b = tz_b.timestamp(i64::from(*b) * 24 * 3600, 0);
-                time_a.date() == time_b.date()
-            }
+            (Value::Date(a), Value::Date(b)) => *a == *b,
             (Value::DateTime(a, tz_a), Value::DateTime(b, tz_b)) => {
-                let time_a = tz_a.timestamp(i64::from(*a), 0);
-                let time_b = tz_b.timestamp(i64::from(*b), 0);
+                let time_a = tz_a.timestamp_opt(i64::from(*a), 0).unwrap();
+                let time_b = tz_b.timestamp_opt(i64::from(*b), 0).unwrap();
                 time_a == time_b
             }
             (Value::ChronoDateTime(a), Value::ChronoDateTime(b)) => *a == *b,
@@ -144,24 +151,28 @@ impl PartialEq for Value {
 impl Value {
     pub(crate) fn default(sql_type: SqlType) -> Value {
         match sql_type {
+            SqlType::Bool => Value::Bool(false),
             SqlType::UInt8 => Value::UInt8(0),
             SqlType::UInt16 => Value::UInt16(0),
             SqlType::UInt32 => Value::UInt32(0),
             SqlType::UInt64 => Value::UInt64(0),
+            SqlType::UInt128 => Value::UInt128(0),
             SqlType::Int8 => Value::Int8(0),
             SqlType::Int16 => Value::Int16(0),
             SqlType::Int32 => Value::Int32(0),
             SqlType::Int64 => Value::Int64(0),
+            SqlType::Int128 => Value::Int128(0),
             SqlType::String => Value::String(Arc::new(Vec::default())),
+            SqlType::LowCardinality(inner) => Value::default(inner.clone()),
             SqlType::FixedString(str_len) => Value::String(Arc::new(vec![0_u8; str_len])),
             SqlType::Float32 => Value::Float32(0.0),
             SqlType::Float64 => Value::Float64(0.0),
-            SqlType::Date => 0_u16.to_date(Tz::Zulu).into(),
+            SqlType::Date => 0_u16.to_date(*DEFAULT_TZ).into(),
             SqlType::DateTime(DateTimeType::DateTime64(_, _)) => {
-                Value::DateTime64(0, (1, Tz::Zulu))
+                Value::DateTime64(0, (1, *DEFAULT_TZ))
             }
             SqlType::SimpleAggregateFunction(_, nested) => Value::default(nested.clone()),
-            SqlType::DateTime(_) => 0_u32.to_date(Tz::Zulu).into(),
+            SqlType::DateTime(_) => 0_u32.to_date(*DEFAULT_TZ).into(),
             SqlType::Nullable(inner) => Value::Nullable(Either::Left(inner)),
             SqlType::Array(inner) => Value::Array(inner, Arc::new(Vec::default())),
             SqlType::Decimal(precision, scale) => Value::Decimal(Decimal {
@@ -183,26 +194,29 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Value::Bool(ref v) => fmt::Display::fmt(v, f),
             Value::UInt8(ref v) => fmt::Display::fmt(v, f),
             Value::UInt16(ref v) => fmt::Display::fmt(v, f),
             Value::UInt32(ref v) => fmt::Display::fmt(v, f),
             Value::UInt64(ref v) => fmt::Display::fmt(v, f),
+            Value::UInt128(ref v) => fmt::Display::fmt(v, f),
             Value::Int8(ref v) => fmt::Display::fmt(v, f),
             Value::Int16(ref v) => fmt::Display::fmt(v, f),
             Value::Int32(ref v) => fmt::Display::fmt(v, f),
             Value::Int64(ref v) => fmt::Display::fmt(v, f),
+            Value::Int128(ref v) => fmt::Display::fmt(v, f),
             Value::String(ref v) => match str::from_utf8(v) {
                 Ok(s) => fmt::Display::fmt(s, f),
-                Err(_) => write!(f, "{:?}", v),
+                Err(_) => write!(f, "{v:?}"),
             },
             Value::Float32(ref v) => fmt::Display::fmt(v, f),
             Value::Float64(ref v) => fmt::Display::fmt(v, f),
             Value::DateTime(u, tz) if f.alternate() => {
-                let time = tz.timestamp(i64::from(*u), 0);
+                let time = tz.timestamp_opt(i64::from(*u), 0).unwrap();
                 fmt::Display::fmt(&time, f)
             }
             Value::DateTime(u, tz) => {
-                let time = tz.timestamp(i64::from(*u), 0);
+                let time = tz.timestamp_opt(i64::from(*u), 0).unwrap();
                 write!(f, "{}", time.to_rfc2822())
             }
             Value::DateTime64(value, params) => {
@@ -213,14 +227,16 @@ impl fmt::Display for Value {
             Value::ChronoDateTime(time) => {
                 write!(f, "{}", time.to_rfc2822())
             }
-            Value::Date(v, tz) if f.alternate() => {
-                let time = tz.timestamp(i64::from(*v) * 24 * 3600, 0);
-                let date = time.date();
+            Value::Date(v) if f.alternate() => {
+                let date = NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .map(|unix_epoch| unix_epoch + Duration::days((*v).into()))
+                    .unwrap();
                 fmt::Display::fmt(&date, f)
             }
-            Value::Date(v, tz) => {
-                let time = tz.timestamp(i64::from(*v) * 24 * 3600, 0);
-                let date = time.date();
+            Value::Date(v) => {
+                let date = NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .map(|unix_epoch| unix_epoch + Duration::days((*v).into()))
+                    .unwrap();
                 fmt::Display::fmt(&date.format("%Y-%m-%d"), f)
             }
             Value::Nullable(v) => match v {
@@ -228,7 +244,7 @@ impl fmt::Display for Value {
                 Either::Right(data) => data.fmt(f),
             },
             Value::Array(_, vs) => {
-                let cells: Vec<String> = vs.iter().map(|v| format!("{}", v)).collect();
+                let cells: Vec<String> = vs.iter().map(|v| format!("{v}")).collect();
                 write!(f, "[{}]", cells.join(", "))
             }
             Value::Decimal(v) => fmt::Display::fmt(v, f),
@@ -243,16 +259,16 @@ impl fmt::Display for Value {
                 buffer[..8].reverse();
                 buffer[8..].reverse();
                 match Uuid::from_slice(&buffer) {
-                    Ok(uuid) => write!(f, "{}", uuid),
-                    Err(e) => write!(f, "{}", e),
+                    Ok(uuid) => write!(f, "{uuid}"),
+                    Err(e) => write!(f, "{e}"),
                 }
             }
-            Value::Enum8(ref _v1, ref v2) => write!(f, "Enum8, {}", v2),
-            Value::Enum16(ref _v1, ref v2) => write!(f, "Enum16, {}", v2),
+            Value::Enum8(ref _v1, ref v2) => write!(f, "Enum8, {v2}"),
+            Value::Enum16(ref _v1, ref v2) => write!(f, "Enum16, {v2}"),
             Value::Map(_, _, hm) => {
                 let cells: Vec<String> = hm
                     .iter()
-                    .map(|(k, v)| format!("key=>{} value=>{}", k, v))
+                    .map(|(k, v)| format!("key=>{k} value=>{v}"))
                     .collect();
                 write!(f, "[{}]", cells.join(", "))
             }
@@ -263,18 +279,21 @@ impl fmt::Display for Value {
 impl From<Value> for SqlType {
     fn from(source: Value) -> Self {
         match source {
+            Value::Bool(_) => SqlType::Bool,
             Value::UInt8(_) => SqlType::UInt8,
             Value::UInt16(_) => SqlType::UInt16,
             Value::UInt32(_) => SqlType::UInt32,
             Value::UInt64(_) => SqlType::UInt64,
+            Value::UInt128(_) => SqlType::UInt128,
             Value::Int8(_) => SqlType::Int8,
             Value::Int16(_) => SqlType::Int16,
             Value::Int32(_) => SqlType::Int32,
             Value::Int64(_) => SqlType::Int64,
+            Value::Int128(_) => SqlType::Int128,
             Value::String(_) => SqlType::String,
             Value::Float32(_) => SqlType::Float32,
             Value::Float64(_) => SqlType::Float64,
-            Value::Date(_, _) => SqlType::Date,
+            Value::Date(_) => SqlType::Date,
             Value::DateTime(_, _) => SqlType::DateTime(DateTimeType::DateTime32),
             Value::ChronoDateTime(_) => SqlType::DateTime(DateTimeType::DateTime32),
             Value::Nullable(d) => match d {
@@ -345,7 +364,7 @@ macro_rules! value_array_from {
 
 impl From<AppDate> for Value {
     fn from(v: AppDate) -> Value {
-        Value::Date(u16::get_days(v), v.timezone())
+        Value::Date(u16::get_days(v))
     }
 }
 
@@ -395,7 +414,7 @@ impl From<Vec<String>> for Value {
     fn from(v: Vec<String>) -> Self {
         Value::Array(
             SqlType::String.into(),
-            Arc::new(v.into_iter().map(|s| s.into()).collect())
+            Arc::new(v.into_iter().map(|s| s.into()).collect()),
         )
     }
 }
@@ -406,12 +425,6 @@ impl From<Uuid> for Value {
         buffer[..8].reverse();
         buffer[8..].reverse();
         Value::Uuid(buffer)
-    }
-}
-
-impl From<bool> for Value {
-    fn from(v: bool) -> Value {
-        Value::UInt8(if v { 1 } else { 0 })
     }
 }
 
@@ -427,23 +440,26 @@ where
             res.insert(k.into(), v.into());
         }
         Self::Map(
-            K::get_sql_type().clone().into(),
-            V::get_sql_type().clone().into(),
+            K::get_sql_type().into(),
+            V::get_sql_type().into(),
             Arc::new(res),
         )
     }
 }
 
 value_from! {
+    bool: Bool,
     u8: UInt8,
     u16: UInt16,
     u32: UInt32,
     u64: UInt64,
+    u128: UInt128,
 
     i8: Int8,
     i16: Int16,
     i32: Int32,
     i64: Int64,
+    i128: Int128,
 
     f32: Float32,
     f64: Float64,
@@ -458,11 +474,13 @@ value_array_from! {
     u16: UInt16,
     u32: UInt32,
     u64: UInt64,
+    u128: UInt128,
 
     i8: Int8,
     i16: Int16,
     i32: Int32,
     i64: Int64,
+    i128: Int128,
 
     f32: Float32,
     f64: Float64
@@ -485,7 +503,17 @@ impl From<Value> for String {
             }
         }
         let from = SqlType::from(v);
-        panic!("Can't convert Value::{} into String.", from);
+        panic!("Can't convert Value::{from} into String.");
+    }
+}
+
+pub(crate) fn get_str_buffer(value: &Value) -> &[u8] {
+    match value {
+        Value::String(bs) => bs.as_slice(),
+        _ => {
+            let from = SqlType::from(value.clone());
+            panic!("Can't convert Value::{} into &[u8].", from);
+        }
     }
 }
 
@@ -495,7 +523,7 @@ impl From<Value> for Vec<u8> {
             Value::String(bs) => bs.to_vec(),
             _ => {
                 let from = SqlType::from(v);
-                panic!("Can't convert Value::{} into Vec<u8>.", from)
+                panic!("Can't convert Value::{from} into Vec<u8>.")
             }
         }
     }
@@ -519,9 +547,10 @@ macro_rules! from_value {
 
 impl From<Value> for AppDate {
     fn from(v: Value) -> AppDate {
-        if let Value::Date(x, tz) = v {
-            let time = tz.timestamp(i64::from(x) * 24 * 3600, 0);
-            return time.date();
+        if let Value::Date(x) = v {
+            return NaiveDate::from_ymd_opt(1970, 1, 1)
+                .map(|unix_epoch| unix_epoch + Duration::days(x.into()))
+                .unwrap();
         }
         let from = SqlType::from(v);
         panic!("Can't convert Value::{} into {}", from, "AppDate")
@@ -531,7 +560,7 @@ impl From<Value> for AppDate {
 impl From<Value> for AppDateTime {
     fn from(v: Value) -> AppDateTime {
         match v {
-            Value::DateTime(u, tz) => tz.timestamp(i64::from(u), 0),
+            Value::DateTime(u, tz) => tz.timestamp_opt(i64::from(u), 0).unwrap(),
             Value::DateTime64(u, params) => {
                 let (precision, tz) = params;
                 to_datetime(u, precision, tz)
@@ -546,14 +575,17 @@ impl From<Value> for AppDateTime {
 }
 
 from_value! {
+    bool: Bool,
     u8: UInt8,
     u16: UInt16,
     u32: UInt32,
     u64: UInt64,
+    u128: UInt128,
     i8: Int8,
     i16: Int16,
     i32: Int32,
     i64: Int64,
+    i128: Int128,
     f32: Float32,
     f64: Float64,
     [u8; 4]: Ipv4
@@ -575,15 +607,15 @@ mod test {
     use chrono_tz::Tz::{self, UTC};
     use std::fmt;
 
+    use crate::{row, Block};
     use rand::{
         distributions::{Distribution, Standard},
         random,
     };
-    use crate::{Block, row};
 
     fn test_into_t<T>(v: Value, x: &T)
     where
-        Value: convert::Into<T>,
+        Value: Into<T>,
         T: PartialEq + fmt::Debug,
     {
         let a: T = v.into();
@@ -592,7 +624,7 @@ mod test {
 
     fn test_from_rnd<T>()
     where
-        Value: convert::Into<T> + convert::From<T>,
+        Value: Into<T> + From<T>,
         T: PartialEq + fmt::Debug + Clone,
         Standard: Distribution<T>,
     {
@@ -604,7 +636,7 @@ mod test {
 
     fn test_from_t<T>(value: &T)
     where
-        Value: convert::Into<T> + convert::From<T>,
+        Value: Into<T> + From<T>,
         T: PartialEq + fmt::Debug + Clone,
     {
         test_into_t::<T>(Value::from(value.clone()), value);
@@ -659,26 +691,26 @@ mod test {
 
     #[test]
     fn test_from_datetime_utc() {
-        let date_time_value: DateTime<Utc> = Utc.ymd(2014, 7, 8).and_hms(14, 0, 0);
+        let date_time_value: DateTime<Utc> = UTC
+            .with_ymd_and_hms(2014, 7, 8, 14, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
         let v = Value::from(date_time_value);
-        assert_eq!(
-            v,
-            Value::DateTime(date_time_value.timestamp() as u32, Tz::UTC)
-        );
+        assert_eq!(v, Value::DateTime(date_time_value.timestamp() as u32, UTC));
     }
 
     #[test]
     fn test_from_date() {
-        let date_value: Date<Tz> = UTC.ymd(2016, 10, 22);
-        let date_time_value: DateTime<Tz> = UTC.ymd(2014, 7, 8).and_hms(14, 0, 0);
+        let date_value: NaiveDate = UTC
+            .with_ymd_and_hms(2016, 10, 22, 0, 0, 0)
+            .unwrap()
+            .date_naive();
+        let date_time_value: DateTime<Tz> = UTC.with_ymd_and_hms(2014, 7, 8, 14, 0, 0).unwrap();
 
         let d: Value = Value::from(date_value);
         let dt: Value = date_time_value.into();
 
-        assert_eq!(
-            Value::Date(u16::get_days(date_value), date_value.timezone()),
-            d
-        );
+        assert_eq!(Value::Date(u16::get_days(date_value)), d);
         assert_eq!(Value::ChronoDateTime(date_time_value), dt);
     }
 
@@ -686,8 +718,8 @@ mod test {
     fn test_boolean() {
         let v = Value::from(false);
         let w = Value::from(true);
-        assert_eq!(v, Value::UInt8(0));
-        assert_eq!(w, Value::UInt8(1));
+        assert_eq!(v, Value::Bool(false));
+        assert_eq!(w, Value::Bool(true));
     }
 
     #[test]
@@ -717,11 +749,13 @@ mod test {
         assert_eq!("42".to_string(), format!("{}", Value::UInt16(42)));
         assert_eq!("42".to_string(), format!("{}", Value::UInt32(42)));
         assert_eq!("42".to_string(), format!("{}", Value::UInt64(42)));
+        assert_eq!("42".to_string(), format!("{}", Value::UInt128(42)));
 
         assert_eq!("42".to_string(), format!("{}", Value::Int8(42)));
         assert_eq!("42".to_string(), format!("{}", Value::Int16(42)));
         assert_eq!("42".to_string(), format!("{}", Value::Int32(42)));
         assert_eq!("42".to_string(), format!("{}", Value::Int64(42)));
+        assert_eq!("42".to_string(), format!("{}", Value::Int128(42)));
 
         assert_eq!(
             "text".to_string(),
@@ -789,7 +823,7 @@ mod test {
             Value::from(Some(3.1)),
             Value::Nullable(Either::Right(Value::Float64(3.1).into()))
         );
-        let date_time_val = UTC.ymd(2019, 1, 1).and_hms(0, 0, 0);
+        let date_time_val = UTC.with_ymd_and_hms(2019, 1, 1, 0, 0, 0).unwrap();
         assert_eq!(
             Value::from(Some(date_time_val)),
             Value::Nullable(Either::Right(Value::ChronoDateTime(date_time_val).into()))
@@ -799,17 +833,19 @@ mod test {
     #[test]
     fn test_value_array_from() {
         let mut block = Block::with_capacity(5);
-        block.push(row! {
-            u16: vec![1_u16, 2, 3],
-            u32: vec![1_u32, 2, 3],
-            u64: vec![1_u64, 2, 3],
-            i8: vec![1_i8, 2, 3],
-            i16: vec![1_i16, 2, 3],
-            i32: vec![1_i32, 2, 3],
-            i64: vec![1_i64, 2, 3],
-            f32: vec![1_f32, 2.0, 3.0],
-            f64: vec![1_f64, 2.0, 3.0],
-        }).unwrap();
+        block
+            .push(row! {
+                u16: vec![1_u16, 2, 3],
+                u32: vec![1_u32, 2, 3],
+                u64: vec![1_u64, 2, 3],
+                i8: vec![1_i8, 2, 3],
+                i16: vec![1_i16, 2, 3],
+                i32: vec![1_i32, 2, 3],
+                i64: vec![1_i64, 2, 3],
+                f32: vec![1_f32, 2.0, 3.0],
+                f64: vec![1_f64, 2.0, 3.0],
+            })
+            .unwrap();
 
         assert_eq!(block.row_count(), 1);
         assert_eq!(block.column_count(), 9);

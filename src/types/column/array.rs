@@ -6,7 +6,11 @@ use crate::{
     binary::{Encoder, ReadEx},
     errors::Result,
     types::{
-        column::{column_data::{BoxColumnData, ArcColumnData}, list::List, ArcColumnWrapper, ColumnData},
+        column::{
+            column_data::{ArcColumnData, BoxColumnData},
+            list::List,
+            ArcColumnWrapper, ColumnData,
+        },
         SqlType, Value, ValueRef,
     },
 };
@@ -31,7 +35,8 @@ impl ArrayColumnData {
             0 => 0,
             _ => offsets.at(rows - 1) as usize,
         };
-        let inner = <dyn ColumnData>::load_data::<ArcColumnWrapper, _>(reader, type_name, size, tz)?;
+        let inner =
+            <dyn ColumnData>::load_data::<ArcColumnWrapper, _>(reader, type_name, size, tz)?;
 
         Ok(ArrayColumnData { inner, offsets })
     }
@@ -86,7 +91,7 @@ impl ColumnData for ArrayColumnData {
             0_usize
         };
         let end = self.offsets.at(index) as usize;
-        let mut vs = Vec::with_capacity(end);
+        let mut vs = Vec::with_capacity(end - start);
         for i in start..end {
             let v = self.inner.at(i);
             vs.push(v);
@@ -101,7 +106,12 @@ impl ColumnData for ArrayColumnData {
         })
     }
 
-    unsafe fn get_internal(&self, pointers: &[*mut *const u8], level: u8, props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        pointers: &[*mut *const u8],
+        level: u8,
+        props: u32,
+    ) -> Result<()> {
         if level == self.sql_type().level() {
             *pointers[0] = self.offsets.as_ptr() as *const u8;
             *(pointers[1] as *mut usize) = self.offsets.len();
@@ -116,11 +126,15 @@ impl ColumnData for ArrayColumnData {
             if let Some(inner) = self.inner.cast_to(&self.inner, inner_target) {
                 return Some(Arc::new(ArrayColumnData {
                     inner,
-                    offsets: self.offsets.clone()
-                }))
+                    offsets: self.offsets.clone(),
+                }));
             }
         }
         None
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.inner.get_timezone()
     }
 }
 
@@ -129,7 +143,7 @@ mod test {
     use std::io::Cursor;
 
     use super::*;
-    use crate::{Block, types::Simple};
+    use crate::types::{column::datetime64::DEFAULT_TZ, Block, Simple};
 
     #[test]
     fn test_write_and_read() {
@@ -142,7 +156,7 @@ mod test {
         block.write(&mut encoder, false);
 
         let mut reader = Cursor::new(encoder.get_buffer_ref());
-        let rblock = Block::load(&mut reader, Tz::Zulu, false).unwrap();
+        let rblock = Block::load(&mut reader, *DEFAULT_TZ, false).unwrap();
 
         assert_eq!(block, rblock);
     }

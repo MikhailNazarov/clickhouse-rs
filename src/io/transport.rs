@@ -3,8 +3,12 @@ use std::{
     io::{self, Cursor},
     pin::Pin,
     ptr,
+    sync::{
+        self,
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{self, Poll},
-    sync::{self, Arc, atomic::{AtomicBool, Ordering}},
 };
 
 use chrono_tz::Tz;
@@ -16,11 +20,17 @@ use crate::{
     binary::Parser,
     errors::{DriverError, Error, Result},
     io::{read_to_end::read_to_end, Stream as InnerStream},
+    pool::{Inner, Pool},
     types::{Block, Cmd, Packet},
-    pool::{Pool, Inner},
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
+
+pub(crate) struct TransportInfo {
+    pub(crate) timezone: Option<Tz>,
+    pub(crate) revision: u64,
+    pub(crate) compress: bool,
+}
 
 /// Line transport
 #[pin_project(project = ClickhouseTransportProj)]
@@ -39,8 +49,10 @@ pub(crate) struct ClickhouseTransport {
     // Queued commands
     cmds: VecDeque<Cmd>,
     // Server time zone
-    timezone: Option<Tz>,
-    compress: bool,
+    // timezone: Option<Tz>,
+    // revision: u64,
+    // compress: bool,
+    info: TransportInfo,
     // Whether there are unread packets
     pub(crate) inconsistent: bool,
     status: Arc<TransportStatus>,
@@ -73,8 +85,11 @@ impl ClickhouseTransport {
             buf_is_incomplete: false,
             wr: io::Cursor::new(vec![]),
             cmds: VecDeque::new(),
-            timezone: None,
-            compress,
+            info: TransportInfo {
+                timezone: None,
+                revision: 0,
+                compress,
+            },
             inconsistent: false,
             status: Arc::new(TransportStatus::new(pool)),
         }
@@ -104,7 +119,7 @@ impl ClickhouseTransport {
             }
         }
 
-        let mut transport = h.unwrap();
+        let mut transport = h.ok_or(Error::Driver(DriverError::UnexpectedPacket))?;
         transport.inconsistent = false;
         Ok(transport)
     }
@@ -144,13 +159,14 @@ impl<'p> ClickhouseTransportProj<'p> {
         let ret = {
             let mut cursor = Cursor::new(&self.rd);
             let res = {
-                let mut parser = Parser::new(&mut cursor, *self.timezone, *self.compress);
-                parser.parse_packet()
+                let mut parser = Parser::new(&mut cursor, self.info);
+                parser.parse_packet(self.info.revision)
             };
             pos = cursor.position() as usize;
 
             if let Ok(Packet::Hello(_, ref packet)) = res {
-                *self.timezone = Some(packet.timezone);
+                self.info.timezone = Some(packet.timezone);
+                self.info.revision = packet.revision;
             }
 
             match res {
@@ -270,6 +286,10 @@ impl Stream for ClickhouseTransport {
             }
         }
 
+        if *this.done {
+            return Poll::Ready(None);
+        }
+
         // Try to parse the new data!
         let ret = this.try_parse_msg();
 
@@ -290,6 +310,7 @@ impl PacketStream {
                 Ok(Packet::Eof(inner)) => h = Some(inner),
                 Ok(Packet::Block(block)) => b = Some(block),
                 Ok(Packet::Exception(e)) => return Err(Error::Server(e)),
+                Ok(Packet::TableColumns(_)) => (),
                 Err(e) => return Err(Error::Io(e)),
                 _ => return Err(Error::Driver(DriverError::UnexpectedPacket)),
             }

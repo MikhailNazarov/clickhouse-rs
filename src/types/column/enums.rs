@@ -7,9 +7,11 @@ use crate::{
     errors::Result,
     types::{
         column::{
-            column_data::BoxColumnData, column_data::ColumnData, list::List,
-            nullable::NullableColumnData, BoxColumnWrapper, ColumnFrom, ColumnWrapper,
-            VectorColumnData,
+            array::ArrayColumnData,
+            column_data::{ArcColumnData, BoxColumnData, ColumnData},
+            list::List,
+            nullable::NullableColumnData,
+            ArcColumnWrapper, BoxColumnWrapper, ColumnFrom, ColumnWrapper, VectorColumnData,
         },
         enums::{Enum16, Enum8},
         from_sql::FromSql,
@@ -65,7 +67,7 @@ impl ColumnData for Enum16ColumnData {
         if let Value::Enum16(_values, enum_value) = value {
             self.inner.push(Value::Int16(enum_value.internal()))
         } else {
-            panic!("value should be Enum ({:?})", value);
+            panic!("value should be Enum ({value:?})");
         }
     }
 
@@ -79,6 +81,22 @@ impl ColumnData for Enum16ColumnData {
             inner: self.inner.clone_instance(),
             enum_values: self.enum_values.clone(),
         })
+    }
+
+    fn cast_to(&self, _this: &ArcColumnData, target: &SqlType) -> Option<ArcColumnData> {
+        if let SqlType::Enum16(data) = target {
+            let data: Enum16ColumnData = Enum16ColumnData {
+                inner: self.inner.clone_instance(),
+                enum_values: data.clone(),
+            };
+            Some(Arc::new(data))
+        } else {
+            None
+        }
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.inner.get_timezone()
     }
 }
 
@@ -115,6 +133,10 @@ impl<K: ColumnType> ColumnData for Enum16Adapter<K> {
 
     fn clone_instance(&self) -> BoxColumnData {
         unimplemented!()
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.column.data.get_timezone()
     }
 }
 
@@ -165,6 +187,10 @@ impl<K: ColumnType> ColumnData for NullableEnum16Adapter<K> {
     fn clone_instance(&self) -> BoxColumnData {
         unimplemented!()
     }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.column.data.get_timezone()
+    }
 }
 
 impl ColumnFrom for Vec<Enum16> {
@@ -182,6 +208,28 @@ impl ColumnFrom for Vec<Enum16> {
         };
 
         W::wrap(column)
+    }
+}
+
+impl ColumnFrom for Vec<Vec<Enum16>> {
+    fn column_from<W: ColumnWrapper>(source: Self) -> W::Wrapper {
+        let fake: Vec<Enum16> = Vec::with_capacity(source.len());
+        let inner = Vec::column_from::<ArcColumnWrapper>(fake);
+        let sql_type = inner.sql_type();
+
+        let mut data = ArrayColumnData {
+            inner,
+            offsets: List::with_capacity(source.len()),
+        };
+
+        for vs in source {
+            let mut inner: Vec<Value> = Vec::with_capacity(vs.len());
+            for v in vs {
+                inner.push(v.into());
+            }
+            data.push(Value::Array(sql_type.clone().into(), Arc::new(inner)));
+        }
+        W::wrap(data)
     }
 }
 
@@ -261,7 +309,7 @@ impl ColumnData for Enum8ColumnData {
         if let Value::Enum8(_values, enum_value) = value {
             self.inner.push(Value::Int8(enum_value.internal()))
         } else {
-            panic!("value should be Enum ({:?})", value);
+            panic!("value should be Enum ({value:?})");
         }
     }
 
@@ -275,6 +323,22 @@ impl ColumnData for Enum8ColumnData {
             inner: self.inner.clone_instance(),
             enum_values: self.enum_values.clone(),
         })
+    }
+
+    fn cast_to(&self, _this: &ArcColumnData, target: &SqlType) -> Option<ArcColumnData> {
+        if let SqlType::Enum8(data) = target {
+            let data: Enum8ColumnData = Enum8ColumnData {
+                inner: self.inner.clone_instance(),
+                enum_values: data.clone(),
+            };
+            Some(Arc::new(data))
+        } else {
+            None
+        }
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.inner.get_timezone()
     }
 }
 
@@ -311,6 +375,10 @@ impl<K: ColumnType> ColumnData for Enum8Adapter<K> {
 
     fn clone_instance(&self) -> BoxColumnData {
         unimplemented!()
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.column.data.get_timezone()
     }
 }
 
@@ -362,6 +430,10 @@ impl<K: ColumnType> ColumnData for NullableEnum8Adapter<K> {
     fn clone_instance(&self) -> BoxColumnData {
         unimplemented!()
     }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.column.data.get_timezone()
+    }
 }
 
 impl ColumnFrom for Vec<Enum8> {
@@ -379,6 +451,28 @@ impl ColumnFrom for Vec<Enum8> {
         };
 
         W::wrap(column)
+    }
+}
+
+impl ColumnFrom for Vec<Vec<Enum8>> {
+    fn column_from<W: ColumnWrapper>(source: Self) -> W::Wrapper {
+        let fake: Vec<Enum8> = Vec::with_capacity(source.len());
+        let inner = Vec::column_from::<ArcColumnWrapper>(fake);
+        let sql_type = inner.sql_type();
+
+        let mut data = ArrayColumnData {
+            inner,
+            offsets: List::with_capacity(source.len()),
+        };
+
+        for vs in source {
+            let mut inner: Vec<Value> = Vec::with_capacity(vs.len());
+            for v in vs {
+                inner.push(v.into());
+            }
+            data.push(Value::Array(sql_type.clone().into(), Arc::new(inner)));
+        }
+        W::wrap(data)
     }
 }
 

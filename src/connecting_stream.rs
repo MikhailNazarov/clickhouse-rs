@@ -5,24 +5,36 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::future::BoxFuture;
-#[cfg(feature = "tls")]
+use futures_util::future::{select_ok, BoxFuture, SelectOk, TryFutureExt};
+#[cfg(feature = "_tls")]
 use futures_util::FutureExt;
-use futures_util::future::{select_ok, SelectOk, TryFutureExt};
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "async_std")]
+use async_std::net::TcpStream;
+#[cfg(feature = "tls-native-tls")]
 use native_tls::TlsConnector;
 #[cfg(feature = "tokio_io")]
 use tokio::net::TcpStream;
-#[cfg(feature = "async_std")]
-use async_std::net::TcpStream;
+#[cfg(feature = "tls-rustls")]
+use {
+    rustls::{
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        crypto::{verify_tls12_signature, verify_tls13_signature},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+        ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore,
+    },
+    std::sync::Arc,
+    tokio_rustls::TlsConnector,
+};
 
 use pin_project::pin_project;
 use url::Url;
 
 use crate::{errors::ConnectionError, io::Stream as InnerStream, Options};
-#[cfg(feature = "tls")]
+#[cfg(feature = "tls-native-tls")]
 use tokio_native_tls::TlsStream;
+#[cfg(feature = "tls-rustls")]
+use tokio_rustls::client::TlsStream;
 
 type Result<T> = std::result::Result<T, ConnectionError>;
 
@@ -34,7 +46,7 @@ enum TcpState {
     Fail(Option<ConnectionError>),
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "_tls")]
 #[pin_project(project = TlsStateProj)]
 enum TlsState {
     Wait(#[pin] ConnectingFuture<TlsStream<TcpStream>>),
@@ -44,7 +56,7 @@ enum TlsState {
 #[pin_project(project = StateProj)]
 enum State {
     Tcp(#[pin] TcpState),
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     Tls(#[pin] TlsState),
 }
 
@@ -56,14 +68,12 @@ impl TcpState {
                 Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
                 Poll::Pending => Poll::Pending,
             },
-            TcpStateProj::Fail(ref mut err) => {
-                Poll::Ready(Err(err.take().unwrap()))
-            },
+            TcpStateProj::Fail(ref mut err) => Poll::Ready(Err(err.take().unwrap())),
         }
     }
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "_tls")]
 impl TlsState {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<InnerStream>> {
         match self.project() {
@@ -75,7 +85,7 @@ impl TlsState {
             TlsStateProj::Fail(ref mut err) => {
                 let e = err.take().unwrap();
                 Poll::Ready(Err(e))
-            },
+            }
         }
     }
 }
@@ -84,7 +94,7 @@ impl State {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<InnerStream>> {
         match self.project() {
             StateProj::Tcp(inner) => inner.poll(cx),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             StateProj::Tls(inner) => inner.poll(cx),
         }
     }
@@ -94,7 +104,7 @@ impl State {
         State::Tcp(TcpState::Fail(Some(conn_error)))
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     fn tls_host_err() -> Self {
         State::Tls(TlsState::Fail(Some(ConnectionError::TlsHostNotProvided)))
     }
@@ -103,7 +113,7 @@ impl State {
         State::Tcp(TcpState::Wait(socket))
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     fn tls_wait(s: ConnectingFuture<TlsStream<TcpStream>>) -> Self {
         State::Tls(TlsState::Wait(s))
     }
@@ -113,6 +123,57 @@ impl State {
 pub(crate) struct ConnectingStream {
     #[pin]
     state: State,
+}
+
+#[derive(Debug)]
+struct DummyTlsVerifier;
+
+#[cfg(feature = "tls-rustls")]
+impl ServerCertVerifier for DummyTlsVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 impl ConnectingStream {
@@ -140,7 +201,7 @@ impl ConnectingStream {
 
                 let socket = select_ok(streams);
 
-                #[cfg(feature = "tls")]
+                #[cfg(feature = "_tls")]
                 {
                     if options.secure {
                         return ConnectingStream::new_tls_connection(addr, socket, options);
@@ -157,13 +218,15 @@ impl ConnectingStream {
         }
     }
 
-    #[cfg(feature = "tls")]
-    fn new_tls_connection(addr: &Url, socket: SelectOk<ConnectingFuture<TcpStream>>, options: &Options) -> Self {
+    #[cfg(feature = "tls-native-tls")]
+    fn new_tls_connection(
+        addr: &Url,
+        socket: SelectOk<ConnectingFuture<TcpStream>>,
+        options: &Options,
+    ) -> Self {
         match addr.host_str().map(|host| host.to_owned()) {
-            None => {
-                Self {
-                    state: State::tls_host_err(),
-                }
+            None => Self {
+                state: State::tls_host_err(),
             },
             Some(host) => {
                 let mut builder = TlsConnector::builder();
@@ -174,18 +237,77 @@ impl ConnectingStream {
                 }
 
                 Self {
-                    state: State::tls_wait(
-                        Box::pin(async move {
-                            let (s, _) = socket.await?;
+                    state: State::tls_wait(Box::pin(async move {
+                        let (s, _) = socket.await?;
 
-                            let cx = builder.build()?;
-                            let cx = tokio_native_tls::TlsConnector::from(cx);
+                        let cx = builder.build()?;
+                        let cx = tokio_native_tls::TlsConnector::from(cx);
 
-                            Ok(cx.connect(&host, s).await?)
-                        })
-                    )
+                        Ok(cx.connect(&host, s).await?)
+                    })),
                 }
+            }
+        }
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    fn new_tls_connection(
+        addr: &Url,
+        socket: SelectOk<ConnectingFuture<TcpStream>>,
+        options: &Options,
+    ) -> Self {
+        match addr.host_str().map(|host| host.to_owned()) {
+            None => Self {
+                state: State::tls_host_err(),
             },
+            Some(host) => {
+                let config = if options.skip_verify {
+                    ClientConfig::builder()
+                        .dangerous()
+                        .with_custom_certificate_verifier(Arc::new(DummyTlsVerifier))
+                        .with_no_client_auth()
+                } else {
+                    let mut cert_store = RootCertStore::empty();
+                    cert_store.extend(
+                        webpki_roots::TLS_SERVER_ROOTS
+                            .iter()
+                            .cloned()
+                    );
+                    if let Some(certificates) = options.certificate.clone() {
+                        for certificate in
+                            Into::<Vec<rustls::pki_types::CertificateDer<'static>>>::into(
+                                certificates,
+                            )
+                        {
+                            match cert_store.add(certificate) {
+                                Ok(_) => {},
+                                Err(err) => {
+                                    let err = io::Error::new(
+                                        io::ErrorKind::InvalidInput,
+                                        format!("Could not load certificate: {}.", err),
+                                    );
+                                    return Self { state: State::tcp_err(err) };
+                                },
+                            }
+                        }
+                    }
+                    ClientConfig::builder()
+                        .with_root_certificates(cert_store)
+                        .with_no_client_auth()
+                };
+                Self {
+                    state: State::tls_wait(Box::pin(async move {
+                        let (s, _) = socket.await?;
+                        let cx = TlsConnector::from(Arc::new(config));
+                        let host = ServerName::try_from(host)
+                            .map_err(|_| ConnectionError::TlsHostNotProvided)?;
+                        Ok(cx
+                            .connect(host, s)
+                            .await
+                            .map_err(|e| ConnectionError::IoError(e))?)
+                    })),
+                }
+            }
         }
     }
 }

@@ -1,8 +1,8 @@
-use std::iter;
+use chrono_tz::Tz;
 
 use crate::{
     binary::Encoder,
-    errors::{Result, Error, FromSqlError},
+    errors::{Error, FromSqlError, Result},
     types::{SqlType, Value, ValueRef},
 };
 
@@ -66,7 +66,12 @@ impl ColumnData for ConcatColumnData {
         unimplemented!()
     }
 
-    unsafe fn get_internal(&self, pointers: &[*mut *const u8], level: u8, _props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        pointers: &[*mut *const u8],
+        level: u8,
+        _props: u32,
+    ) -> Result<()> {
         if level == 0xff {
             *pointers[0] = &self.data as *const Vec<ArcColumnData> as *mut u8;
             Ok(())
@@ -74,11 +79,15 @@ impl ColumnData for ConcatColumnData {
             Err(Error::FromSql(FromSqlError::UnsupportedOperation))
         }
     }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.data.first().and_then(|chunk| chunk.get_timezone())
+    }
 }
 
 fn build_index<'a, I>(sizes: I) -> Vec<usize>
 where
-    I: iter::Iterator<Item = usize> + 'a,
+    I: Iterator<Item = usize> + 'a,
 {
     let mut acc = 0;
     let mut index = vec![acc];
@@ -127,7 +136,7 @@ mod test {
 
     #[test]
     fn test_build_index() {
-        let sizes = vec![2_usize, 3, 4];
+        let sizes = [2_usize, 3, 4];
         let index = build_index(sizes.iter().cloned());
         assert_eq!(index, vec![0, 2, 5, 9])
     }

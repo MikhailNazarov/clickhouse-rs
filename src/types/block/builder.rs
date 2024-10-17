@@ -7,7 +7,7 @@ use crate::{
     errors::{Error, FromSqlError, Result},
     types::{
         block::ColumnIdx,
-        column::{ArcColumnWrapper, ColumnData},
+        column::{datetime64::DEFAULT_TZ, ArcColumnWrapper, ColumnData},
         Column, ColumnType, Value,
     },
     Block,
@@ -116,17 +116,17 @@ fn put_param<K: ColumnType>(
 
 fn extract_timezone(value: &Value) -> Tz {
     match value {
-        Value::Date(_, tz) => *tz,
+        Value::Date(_) => *DEFAULT_TZ,
         Value::DateTime(_, tz) => *tz,
         Value::Nullable(Either::Right(d)) => extract_timezone(d),
         Value::Array(_, data) => {
             if let Some(v) = data.first() {
                 extract_timezone(v)
             } else {
-                Tz::Zulu
+                *DEFAULT_TZ
             }
         }
-        _ => Tz::Zulu,
+        _ => *DEFAULT_TZ,
     }
 }
 
@@ -144,8 +144,8 @@ mod test {
 
     #[test]
     fn test_push_row() {
-        let date_value: Date<Tz> = UTC.ymd(2016, 10, 22);
-        let date_time_value: DateTime<Tz> = UTC.ymd(2014, 7, 8).and_hms(14, 0, 0);
+        let date_value: NaiveDate = NaiveDate::from_ymd_opt(2016, 10, 22).unwrap();
+        let date_time_value: DateTime<Tz> = UTC.with_ymd_and_hms(2014, 7, 8, 14, 0, 0).unwrap();
 
         let decimal = Decimal::of(2.0_f64, 4);
 

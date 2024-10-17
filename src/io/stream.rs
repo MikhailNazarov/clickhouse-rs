@@ -1,30 +1,32 @@
 use std::{
     io,
-    time::Duration,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 #[cfg(feature = "tokio_io")]
-use tokio::{net::TcpStream, io::ReadBuf};
-#[cfg(feature = "tls")]
+use tokio::{io::ReadBuf, net::TcpStream};
+#[cfg(feature = "tls-native-tls")]
 use tokio_native_tls::TlsStream;
+#[cfg(feature = "tls-rustls")]
+use tokio_rustls::client::TlsStream;
 
-#[cfg(feature = "tokio_io")]
-use tokio::io::{AsyncRead, AsyncWrite};
-use pin_project::pin_project;
-#[cfg(feature = "async_std")]
-use async_std::net::TcpStream;
 #[cfg(feature = "async_std")]
 use async_std::io::prelude::*;
+#[cfg(feature = "async_std")]
+use async_std::net::TcpStream;
+use pin_project::pin_project;
+#[cfg(feature = "tokio_io")]
+use tokio::io::{AsyncRead, AsyncWrite};
 
-#[cfg(all(feature = "tls", feature = "tokio_io"))]
+#[cfg(all(feature = "_tls", feature = "tokio_io"))]
 type SecureTcpStream = TlsStream<TcpStream>;
 
 #[pin_project(project = StreamProj)]
 pub(crate) enum Stream {
     Plain(#[pin] TcpStream),
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     Secure(#[pin] SecureTcpStream),
 }
 
@@ -34,7 +36,7 @@ impl From<TcpStream> for Stream {
     }
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "_tls")]
 impl From<SecureTcpStream> for Stream {
     fn from(stream: SecureTcpStream) -> Stream {
         Self::Secure(stream)
@@ -55,7 +57,7 @@ impl Stream {
     pub(crate) fn set_keepalive(&mut self, keepalive: Option<Duration>) -> io::Result<()> {
         // match *self {
         //     Self::Plain(ref mut stream) => stream.set_keepalive(keepalive),
-        //     #[cfg(feature = "tls")]
+        //     #[cfg(feature = "_tls")]
         //     Self::Secure(ref mut stream) => stream.get_mut().set_keepalive(keepalive),
         // }.map_err(|err| io::Error::new(err.kind(), format!("set_keepalive error: {}", err)))
         if keepalive.is_some() {
@@ -68,27 +70,40 @@ impl Stream {
     pub(crate) fn set_nodelay(&mut self, nodelay: bool) -> io::Result<()> {
         match *self {
             Self::Plain(ref mut stream) => stream.set_nodelay(nodelay),
-            #[cfg(feature = "tls")]
-            Self::Secure(ref mut stream) => stream.get_mut().get_mut().get_mut().set_nodelay(nodelay),
-        }.map_err(|err| io::Error::new(err.kind(), format!("set_nodelay error: {}", err)))
+            #[cfg(feature = "tls-native-tls")]
+            Self::Secure(ref mut stream) => {
+                stream.get_mut().get_mut().get_mut().set_nodelay(nodelay)
+            }
+            #[cfg(feature = "tls-rustls")]
+            Self::Secure(ref mut stream) => stream.get_mut().0.set_nodelay(nodelay),
+        }
+        .map_err(|err| io::Error::new(err.kind(), format!("set_nodelay error: {err}")))
     }
 
     #[cfg(feature = "async_std")]
-    pub(crate) fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+    pub(crate) fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
         match self.project() {
             StreamProj::Plain(stream) => stream.poll_read(cx, buf),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             StreamProj::Secure(stream) => stream.poll_read(cx, buf),
         }
     }
 
     #[cfg(not(feature = "async_std"))]
-    pub(crate) fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+    pub(crate) fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
         let mut read_buf = ReadBuf::new(buf);
 
         let result = match self.project() {
             StreamProj::Plain(stream) => stream.poll_read(cx, &mut read_buf),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             StreamProj::Secure(stream) => stream.poll_read(cx, &mut read_buf),
         };
 
@@ -99,10 +114,14 @@ impl Stream {
         }
     }
 
-    pub(crate) fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    pub(crate) fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         match self.project() {
             StreamProj::Plain(stream) => stream.poll_write(cx, buf),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             StreamProj::Secure(stream) => stream.poll_write(cx, buf),
         }
     }

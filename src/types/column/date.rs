@@ -1,21 +1,24 @@
-use std::{convert, fmt, sync::Arc};
+use std::{fmt, ptr, sync::Arc};
 
-use chrono::{prelude::*, Date};
+use chrono::prelude::*;
 use chrono_tz::Tz;
 use either::Either;
 
 use crate::{
     binary::{Encoder, ReadEx},
     errors::Result,
-    types::column::{
-        array::ArrayColumnData,
-        column_data::{BoxColumnData, ColumnData},
-        list::List,
-        nullable::NullableColumnData,
-        numeric::save_data,
-        ArcColumnWrapper, ColumnFrom, ColumnWrapper,
+    types::{
+        column::{
+            array::ArrayColumnData,
+            column_data::{BoxColumnData, ColumnData, LowCardinalityAccessor},
+            datetime64::DEFAULT_TZ,
+            list::List,
+            nullable::NullableColumnData,
+            numeric::save_data,
+            ArcColumnWrapper, ColumnFrom, ColumnWrapper,
+        },
+        DateConverter, Marshal, SqlType, StatBuffer, Unmarshal, Value, ValueRef,
     },
-    types::{DateConverter, Marshal, SqlType, StatBuffer, Unmarshal, Value, ValueRef},
 };
 
 pub struct DateColumnData<T>
@@ -24,8 +27,8 @@ where
         + Unmarshal<T>
         + Marshal
         + Copy
-        + convert::Into<Value>
-        + convert::From<Value>
+        + Into<Value>
+        + From<Value>
         + fmt::Display
         + Sync
         + Default
@@ -41,8 +44,8 @@ where
         + Unmarshal<T>
         + Marshal
         + Copy
-        + convert::Into<Value>
-        + convert::From<Value>
+        + Into<Value>
+        + From<Value>
         + fmt::Display
         + Sync
         + Default
@@ -69,21 +72,24 @@ where
     }
 }
 
-impl ColumnFrom for Vec<Date<Tz>> {
+impl ColumnFrom for Vec<NaiveDate> {
     fn column_from<W: ColumnWrapper>(source: Self) -> W::Wrapper {
         let mut data = List::<u16>::with_capacity(source.len());
         for s in source {
             data.push(u16::get_days(s));
         }
 
-        let column: DateColumnData<u16> = DateColumnData { data, tz: Tz::Zulu };
+        let column: DateColumnData<u16> = DateColumnData {
+            data,
+            tz: *DEFAULT_TZ,
+        };
         W::wrap(column)
     }
 }
 
-impl ColumnFrom for Vec<Vec<Date<Tz>>> {
+impl ColumnFrom for Vec<Vec<NaiveDate>> {
     fn column_from<W: ColumnWrapper>(source: Self) -> W::Wrapper {
-        let fake: Vec<Date<Tz>> = Vec::with_capacity(source.len());
+        let fake: Vec<NaiveDate> = Vec::with_capacity(source.len());
         let inner = Vec::column_from::<ArcColumnWrapper>(fake);
         let sql_type = inner.sql_type();
 
@@ -96,7 +102,7 @@ impl ColumnFrom for Vec<Vec<Date<Tz>>> {
             let mut inner = Vec::with_capacity(vs.len());
             for v in vs {
                 let days = u16::get_days(v);
-                let value: Value = Value::Date(days, v.timezone());
+                let value: Value = Value::Date(days);
                 inner.push(value);
             }
             data.push(Value::Array(sql_type.clone().into(), Arc::new(inner)));
@@ -130,9 +136,9 @@ impl ColumnFrom for Vec<Vec<DateTime<Tz>>> {
     }
 }
 
-impl ColumnFrom for Vec<Option<Date<Tz>>> {
+impl ColumnFrom for Vec<Option<NaiveDate>> {
     fn column_from<W: ColumnWrapper>(source: Self) -> <W as ColumnWrapper>::Wrapper {
-        let fake: Vec<Date<Tz>> = Vec::with_capacity(source.len());
+        let fake: Vec<NaiveDate> = Vec::with_capacity(source.len());
         let inner = Vec::column_from::<ArcColumnWrapper>(fake);
 
         let mut data = NullableColumnData {
@@ -145,7 +151,7 @@ impl ColumnFrom for Vec<Option<Date<Tz>>> {
                 None => data.push(Value::Nullable(Either::Left(SqlType::Date.into()))),
                 Some(d) => {
                     let days = u16::get_days(d);
-                    let value = Value::Date(days, d.timezone());
+                    let value = Value::Date(days);
                     data.push(Value::Nullable(Either::Right(Box::new(value))))
                 }
             }
@@ -155,14 +161,30 @@ impl ColumnFrom for Vec<Option<Date<Tz>>> {
     }
 }
 
+impl<T> LowCardinalityAccessor for DateColumnData<T> where
+    T: StatBuffer
+        + Unmarshal<T>
+        + Marshal
+        + Copy
+        + Into<Value>
+        + From<Value>
+        + fmt::Display
+        + Sync
+        + Send
+        + DateConverter
+        + Default
+        + 'static
+{
+}
+
 impl<T> ColumnData for DateColumnData<T>
 where
     T: StatBuffer
         + Unmarshal<T>
         + Marshal
         + Copy
-        + convert::Into<Value>
-        + convert::From<Value>
+        + Into<Value>
+        + From<Value>
         + fmt::Display
         + Sync
         + Send
@@ -197,37 +219,81 @@ where
         })
     }
 
-    unsafe fn get_internal(&self, pointers: &[*mut *const u8], level: u8, _props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        pointers: &[*mut *const u8],
+        level: u8,
+        _props: u32,
+    ) -> Result<()> {
         assert_eq!(level, 0);
         *pointers[0] = self.data.as_ptr() as *const u8;
         *pointers[1] = &self.tz as *const Tz as *const u8;
         *(pointers[2] as *mut usize) = self.len();
         Ok(())
     }
+
+    unsafe fn get_internals(&self, data_ptr: *mut (), _level: u8, _props: u32) -> Result<()> {
+        unsafe {
+            let data_ref = &mut *(data_ptr as *mut DateTimeInternals);
+            data_ref.begin = self.data.as_ptr().cast();
+            data_ref.len = self.data.len();
+            data_ref.tz = self.tz;
+            Ok(())
+        }
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        Some(self.tz)
+    }
+
+    fn get_low_cardinality_accessor(&self) -> Option<&dyn LowCardinalityAccessor> {
+        Some(self)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DateTimeInternals {
+    pub(crate) begin: *const (),
+    pub(crate) len: usize,
+    pub(crate) tz: Tz,
+    pub(crate) precision: Option<u32>,
+}
+
+impl Default for DateTimeInternals {
+    fn default() -> Self {
+        Self {
+            begin: ptr::null(),
+            len: 0,
+            tz: Tz::Zulu,
+            precision: None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
     use chrono::TimeZone;
-    use chrono_tz::Tz;
 
-    use crate::types::column::ArcColumnWrapper;
+    use crate::types::column::{datetime64::DEFAULT_TZ, ArcColumnWrapper};
 
     use super::*;
 
     #[test]
     fn test_create_date() {
-        let tz = Tz::Zulu;
-        let column = Vec::column_from::<ArcColumnWrapper>(vec![tz.ymd(2016, 10, 22)]);
-        assert_eq!("2016-10-22UTC", format!("{:#}", column.at(0)));
+        let column =
+            Vec::column_from::<ArcColumnWrapper>(vec![
+                NaiveDate::from_ymd_opt(2016, 10, 22).unwrap()
+            ]);
+        assert_eq!("2016-10-22", format!("{:#}", column.at(0)));
         assert_eq!(SqlType::Date, column.sql_type());
     }
 
     #[test]
     fn test_create_date_time() {
-        let tz = Tz::Zulu;
-        let column =
-            Vec::column_from::<ArcColumnWrapper>(vec![tz.ymd(2016, 10, 22).and_hms(12, 0, 0)]);
+        let tz = *DEFAULT_TZ;
+        let column = Vec::column_from::<ArcColumnWrapper>(vec![tz
+            .with_ymd_and_hms(2016, 10, 22, 12, 0, 0)
+            .unwrap()]);
         assert_eq!(format!("{}", column.at(0)), "2016-10-22 12:00:00");
     }
 }

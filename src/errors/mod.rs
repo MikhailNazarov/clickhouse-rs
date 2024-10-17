@@ -5,6 +5,11 @@ use thiserror::Error;
 use tokio::time::error::Elapsed;
 use url::ParseError;
 
+#[cfg(feature = "tls-native-tls")]
+use native_tls::Error as TlsError;
+#[cfg(feature = "tls-rustls")]
+use rustls::Error as TlsError;
+
 /// Clickhouse error codes
 pub mod codes;
 
@@ -55,9 +60,12 @@ pub enum ConnectionError {
     #[error("Input/output error: `{}`", _0)]
     IoError(#[source] io::Error),
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     #[error("TLS connection error: `{}`", _0)]
-    TlsError(#[source] native_tls::Error),
+    TlsError(#[source] TlsError),
+
+    #[error("Connection broken")]
+    Broken,
 }
 
 /// This type enumerates connection URL errors.
@@ -66,10 +74,7 @@ pub enum UrlError {
     #[error("Invalid or incomplete connection URL")]
     Invalid,
 
-    #[error(
-        "Invalid value `{}' for connection URL parameter `{}'",
-        value, param
-    )]
+    #[error("Invalid value `{}' for connection URL parameter `{}'", value, param)]
     InvalidParamValue { param: String, value: String },
 
     #[error("URL parse error: {}", _0)]
@@ -99,6 +104,9 @@ pub enum DriverError {
 
     #[error("Invalid utf-8 sequence.")]
     Utf8Error(Utf8Error),
+
+    #[error("Deserialize error: `{}`", _0)]
+    Deserialize(Cow<'static, str>),
 }
 
 /// This type enumerates cast from sql type errors.
@@ -134,9 +142,9 @@ impl From<ConnectionError> for Error {
     }
 }
 
-#[cfg(feature = "tls")]
-impl From<native_tls::Error> for ConnectionError {
-    fn from(error: native_tls::Error) -> Self {
+#[cfg(feature = "_tls")]
+impl From<TlsError> for ConnectionError {
+    fn from(error: TlsError) -> Self {
         ConnectionError::TlsError(error)
     }
 }

@@ -6,14 +6,13 @@ use crate::{
     binary::Encoder,
     errors::Result,
     types::{
-        SqlType,
-        DateTimeType,
         column::{
-            column_data::{BoxColumnData, ArcColumnData, ColumnData},
-            datetime64::from_datetime,
+            column_data::{ArcColumnData, BoxColumnData, ColumnData},
+            datetime64::{from_datetime, DEFAULT_TZ},
             nullable::NullableColumnData,
             ArcColumnWrapper, ColumnFrom, ColumnWrapper, Value, ValueRef,
-        }
+        },
+        DateTimeType, SqlType,
     },
 };
 
@@ -43,7 +42,7 @@ impl ChronoDateTimeAdapter {
 impl ColumnFrom for Vec<DateTime<Tz>> {
     fn column_from<W: ColumnWrapper>(data: Self) -> W::Wrapper {
         let tz = if data.is_empty() {
-            Tz::Zulu
+            *DEFAULT_TZ
         } else {
             data[0].timezone()
         };
@@ -58,7 +57,7 @@ impl ColumnFrom for Vec<Option<DateTime<Tz>>> {
         let tz = source
             .iter()
             .find_map(|u| u.map(|v| v.timezone()))
-            .unwrap_or(Tz::Zulu);
+            .unwrap_or(*DEFAULT_TZ);
 
         let mut values: Vec<DateTime<Tz>> = Vec::with_capacity(n);
         let mut nulls = Vec::with_capacity(n);
@@ -67,7 +66,7 @@ impl ColumnFrom for Vec<Option<DateTime<Tz>>> {
             match time {
                 None => {
                     nulls.push(1);
-                    values.push(tz.timestamp(0, 0))
+                    values.push(tz.timestamp_opt(0, 0).unwrap())
                 }
                 Some(time) => {
                     nulls.push(0);
@@ -113,7 +112,12 @@ impl ColumnData for ChronoDateTimeColumnData {
         })
     }
 
-    unsafe fn get_internal(&self, pointers: &[*mut *const u8], level: u8, _props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        pointers: &[*mut *const u8],
+        level: u8,
+        _props: u32,
+    ) -> Result<()> {
         assert_eq!(level, 0);
         *pointers[0] = self.data.as_ptr() as *const u8;
         *pointers[1] = &self.tz as *const Tz as *const u8;
@@ -129,6 +133,10 @@ impl ColumnData for ChronoDateTimeColumnData {
         } else {
             None
         }
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        Some(self.tz)
     }
 }
 
@@ -149,7 +157,7 @@ pub(crate) fn get_date_slice<'a>(column: &dyn ColumnData) -> Result<&'a [DateTim
                 &mut len as *mut usize as *mut *const u8,
             ],
             0,
-            0
+            0,
         )?;
         assert_ne!(data, ptr::null());
         assert_ne!(tz, ptr::null());
@@ -202,7 +210,16 @@ impl ColumnData for ChronoDateTimeAdapter {
         unimplemented!()
     }
 
-    unsafe fn get_internal(&self, _pointers: &[*mut *const u8], _level: u8, _props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        _pointers: &[*mut *const u8],
+        _level: u8,
+        _props: u32,
+    ) -> Result<()> {
         unimplemented!()
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        self.column.get_timezone()
     }
 }

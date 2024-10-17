@@ -4,7 +4,7 @@ use crate::{
     binary::{protocol, Encoder},
     client_info,
     errors::Result,
-    types::{Context, Query, Simple, Options},
+    types::{Context, Options, Query, SettingType, Simple},
     Block,
 };
 
@@ -78,6 +78,7 @@ fn encode_cancel() -> Vec<u8> {
 fn encode_query(query: &Query, context: &Context) -> Result<Vec<u8>> {
     trace!("[send query] {}", query.get_sql());
 
+    // DBMS_MIN_REVISION_WITH_CLIENT_INFO
     let mut encoder = Encoder::new();
     encoder.uvarint(protocol::CLIENT_QUERY);
     encoder.string("");
@@ -86,7 +87,7 @@ fn encode_query(query: &Query, context: &Context) -> Result<Vec<u8>> {
         let hostname = &context.hostname;
         encoder.uvarint(1);
         encoder.string("");
-        encoder.string(&query.get_id()); // initial_query_id;
+        encoder.string(query.get_id()); // initial_query_id;
         encoder.string("[::ffff:127.0.0.1]:0");
         encoder.uvarint(1); // iface type TCP;
         encoder.string(hostname);
@@ -98,9 +99,15 @@ fn encode_query(query: &Query, context: &Context) -> Result<Vec<u8>> {
         encoder.string("");
     }
 
+    if context.server_info.revision >= protocol::DBMS_MIN_REVISION_WITH_VERSION_PATCH {
+        encoder.uvarint(0);
+    }
+
     let options = context.options.get()?;
 
-    let settings_format = if context.server_info.revision >= protocol::DBMS_MIN_REVISION_WITH_SETTINGS_SERIALIZED_AS_STRINGS {
+    let settings_format = if context.server_info.revision
+        >= protocol::DBMS_MIN_REVISION_WITH_SETTINGS_SERIALIZED_AS_STRINGS
+    {
         SettingsBinaryFormat::Strings
     } else {
         SettingsBinaryFormat::Old
@@ -118,32 +125,34 @@ fn encode_query(query: &Query, context: &Context) -> Result<Vec<u8>> {
 
     let options = context.options.get()?;
 
-    encoder.string(&query.get_sql());
+    encoder.string(query.get_sql());
     Block::<Simple>::default().send_data(&mut encoder, options.compression);
 
     Ok(encoder.get_buffer())
 }
 
 fn serialize_settings(encoder: &mut Encoder, options: &Options, format: SettingsBinaryFormat) {
-
-    if let Some(level) = options.readonly {
-        encoder.string("readonly");
-        if format >= SettingsBinaryFormat::Strings {
-            encoder.write(0_u8); // is_important
+    if format < SettingsBinaryFormat::Strings {
+        for (name, value) in &options.settings {
+            encoder.string(name);
+            match &value.value {
+                SettingType::String(val) => encoder.string(val),
+                // Bool and UInt64 is the same
+                SettingType::Bool(val) => encoder.uvarint((val == &true) as u64),
+                // Float is written in string representation
+                SettingType::Float64(val) => encoder.string(val.to_string()),
+                SettingType::UInt64(val) => encoder.uvarint(*val),
+            }
         }
-        serialize_uint(encoder, level as u64, format);
+    } else {
+        for (name, value) in &options.settings {
+            encoder.string(name);
+            encoder.write(value.is_important);
+            encoder.string(value.to_string());
+        }
     }
 
-    encoder.string(""); // settings
-}
-
-fn serialize_uint(encoder: &mut Encoder, value: u64, format: SettingsBinaryFormat) {
-    if format >= SettingsBinaryFormat::Strings {
-        encoder.string(format!("{}", value));
-        return;
-    }
-
-    encoder.uvarint(value);
+    encoder.string(""); // end of settings marker
 }
 
 fn encode_data(block: &Block, context: &Context) -> Result<Vec<u8>> {

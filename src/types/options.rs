@@ -1,8 +1,6 @@
-#[cfg(feature = "tls")]
-use std::convert;
-
 use std::{
     borrow::Cow,
+    collections::HashMap,
     fmt,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -10,10 +8,6 @@ use std::{
 };
 
 use crate::errors::{Error, Result, UrlError};
-#[cfg(feature = "tls")]
-use std::fmt::Formatter;
-#[cfg(feature = "tls")]
-use native_tls;
 use percent_encoding::percent_decode;
 use url::Url;
 
@@ -37,8 +31,8 @@ impl fmt::Debug for OptionsSource {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let guard = self.state.lock().unwrap();
         match *guard {
-            State::Url(ref url) => write!(f, "Url({})", url),
-            State::Raw(ref options) => write!(f, "{:?}", options),
+            State::Url(ref url) => write!(f, "Url({url})"),
+            State::Raw(ref options) => write!(f, "{options:?}"),
         }
     }
 }
@@ -97,12 +91,11 @@ impl IntoOptions for String {
     }
 }
 
-/// An X509 certificate.
-#[cfg(feature = "tls")]
+/// An X509 certificate for native-tls.
+#[cfg(feature = "tls-native-tls")]
 #[derive(Clone)]
 pub struct Certificate(Arc<native_tls::Certificate>);
-
-#[cfg(feature = "tls")]
+#[cfg(feature = "tls-native-tls")]
 impl Certificate {
     /// Parses a DER-formatted X509 certificate.
     pub fn from_der(der: &[u8]) -> Result<Certificate> {
@@ -122,25 +115,120 @@ impl Certificate {
         Ok(Certificate(Arc::new(inner)))
     }
 }
-
-#[cfg(feature = "tls")]
-impl fmt::Debug for Certificate {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "[Certificate]")
+#[cfg(feature = "tls-native-tls")]
+impl From<Certificate> for native_tls::Certificate {
+    fn from(value: Certificate) -> Self {
+        value.0.as_ref().clone()
     }
 }
 
-#[cfg(feature = "tls")]
+/// An X509 certificate for rustls.
+#[cfg(feature = "tls-rustls")]
+#[derive(Clone)]
+pub struct Certificate(Arc<Vec<rustls::pki_types::CertificateDer<'static>>>);
+#[cfg(feature = "tls-rustls")]
+impl Certificate {
+    /// Parses a DER-formatted X509 certificate.
+    pub fn from_der(der: &[u8]) -> Result<Certificate> {
+        let der = der.to_vec();
+        let inner = match rustls::pki_types::CertificateDer::try_from(der) {
+            Ok(certificate) => certificate,
+            Err(err) => return Err(Error::Other(err.to_string().into())),
+        };
+        Ok(Certificate(Arc::new(vec![inner])))
+    }
+
+    /// Parses a PEM-formatted X509 certificate.
+    pub fn from_pem(der: &[u8]) -> Result<Certificate> {
+        let certs = rustls_pemfile::certs(&mut der.as_ref())
+            .map(|result| result.unwrap())
+            .collect();
+        Ok(Certificate(Arc::new(certs)))
+    }
+}
+#[cfg(feature = "tls-rustls")]
+impl From<Certificate> for Vec<rustls::pki_types::CertificateDer<'static>> {
+    fn from(value: Certificate) -> Self {
+        value.0.as_ref().clone()
+    }
+}
+
+#[cfg(feature = "_tls")]
+impl fmt::Debug for Certificate {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[Certificate]")
+    }
+}
+#[cfg(feature = "_tls")]
 impl PartialEq for Certificate {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
 }
 
-#[cfg(feature = "tls")]
-impl convert::From<Certificate> for native_tls::Certificate {
-    fn from(value: Certificate) -> Self {
-        value.0.as_ref().clone()
+#[derive(Clone, PartialEq, Debug)]
+pub enum SettingType {
+    String(String),
+    Bool(bool),
+    UInt64(u64),
+    Float64(f64),
+}
+
+impl fmt::Display for SettingType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            SettingType::Bool(val) => write!(f, "{val}"),
+            SettingType::UInt64(val) => write!(f, "{val}"),
+            SettingType::Float64(val) => write!(f, "{val}"),
+            SettingType::String(val) => write!(f, "{val}"),
+        }
+    }
+}
+
+impl From<&str> for SettingType {
+    fn from(val: &str) -> Self {
+        SettingType::String(val.into())
+    }
+}
+
+impl From<bool> for SettingType {
+    fn from(val: bool) -> Self {
+        SettingType::Bool(val)
+    }
+}
+
+impl From<u64> for SettingType {
+    fn from(val: u64) -> Self {
+        SettingType::UInt64(val)
+    }
+}
+
+impl From<i32> for SettingType {
+    fn from(val: i32) -> Self {
+        SettingType::UInt64(val as u64)
+    }
+}
+
+impl From<i64> for SettingType {
+    fn from(val: i64) -> Self {
+        SettingType::UInt64(val as u64)
+    }
+}
+
+impl From<f64> for SettingType {
+    fn from(val: f64) -> Self {
+        SettingType::Float64(val)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct SettingValue {
+    pub(crate) value: SettingType,
+    pub(crate) is_important: bool,
+}
+impl fmt::Display for SettingValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
     }
 }
 
@@ -192,19 +280,19 @@ pub struct Options {
     pub(crate) execute_timeout: Option<Duration>,
 
     /// Enable TLS encryption (defaults to `false`)
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     pub(crate) secure: bool,
 
     /// Skip certificate verification (default is `false`).
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     pub(crate) skip_verify: bool,
 
     /// An X509 certificate.
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     pub(crate) certificate: Option<Certificate>,
 
-    /// Restricts permissions for read data, write data and change settings queries.
-    pub(crate) readonly: Option<u8>,
+    /// Query settings
+    pub(crate) settings: HashMap<String, SettingValue>,
 
     /// Comma separated list of single address host for load-balancing.
     pub(crate) alt_hosts: Vec<Url>,
@@ -225,7 +313,7 @@ impl fmt::Debug for Options {
             .field("retry_timeout", &self.retry_timeout)
             .field("ping_timeout", &self.ping_timeout)
             .field("connection_timeout", &self.connection_timeout)
-            .field("readonly", &self.readonly)
+            .field("settings", &self.settings)
             .field("alt_hosts", &self.alt_hosts)
             .finish()
     }
@@ -251,13 +339,13 @@ impl Default for Options {
             query_timeout: Duration::from_secs(180),
             insert_timeout: Some(Duration::from_secs(180)),
             execute_timeout: Some(Duration::from_secs(180)),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             secure: false,
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             skip_verify: false,
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             certificate: None,
-            readonly: None,
+            settings: HashMap::new(),
             alt_hosts: Vec::new(),
         }
     }
@@ -293,6 +381,21 @@ impl Options {
             addr: addr.into(),
             ..Self::default()
         }
+    }
+
+    pub fn with_setting<V>(mut self, name: &str, value: V, is_important: bool) -> Self
+    where
+        V: Into<SettingType>,
+    {
+        let value: SettingType = value.into();
+        self.settings.insert(
+            name.into(),
+            SettingValue {
+                value,
+                is_important,
+            },
+        );
+        self
     }
 
     property! {
@@ -378,27 +481,27 @@ impl Options {
         => execute_timeout: Option<Duration>
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     property! {
         /// Establish secure connection (default is `false`).
         => secure: bool
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     property! {
         /// Skip certificate verification (default is `false`).
         => skip_verify: bool
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     property! {
         /// An X509 certificate.
         => certificate: Option<Certificate>
     }
 
     property! {
-        /// Restricts permissions for read data, write data and change settings queries.
-        => readonly: Option<u8>
+        /// Query settings
+        => settings: HashMap<String, SettingValue>
     }
 
     property! {
@@ -475,23 +578,29 @@ where
             "connection_timeout" => {
                 options.connection_timeout = parse_param(key, value, parse_duration)?
             }
-            "query_timeout" => {
-                options.query_timeout = parse_param(key, value, parse_duration)?
-            },
+            "query_timeout" => options.query_timeout = parse_param(key, value, parse_duration)?,
             "insert_timeout" => {
                 options.insert_timeout = parse_param(key, value, parse_opt_duration)?
             }
             "execute_timeout" => {
                 options.execute_timeout = parse_param(key, value, parse_opt_duration)?
-            },
+            }
             "compression" => options.compression = parse_param(key, value, parse_compression)?,
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             "secure" => options.secure = parse_param(key, value, bool::from_str)?,
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "_tls")]
             "skip_verify" => options.skip_verify = parse_param(key, value, bool::from_str)?,
-            "readonly" => options.readonly = parse_param(key, value, parse_opt_u8)?,
             "alt_hosts" => options.alt_hosts = parse_param(key, value, parse_hosts)?,
-            _ => return Err(UrlError::UnknownParameter { param: key.into() }),
+            _ => {
+                let value = SettingType::String(value.to_string());
+                options.settings.insert(
+                    key.to_string(),
+                    SettingValue {
+                        value,
+                        is_important: true,
+                    },
+                );
+            }
         };
     }
 
@@ -521,14 +630,12 @@ fn get_username_from_url(url: &Url) -> Option<Cow<'_, str>> {
     if user.is_empty() {
         return None;
     }
-    Some(percent_decode(user.as_bytes())
-        .decode_utf8_lossy())
+    Some(percent_decode(user.as_bytes()).decode_utf8_lossy())
 }
 
 fn get_password_from_url(url: &Url) -> Option<Cow<'_, str>> {
     let password = url.password()?;
-    Some(percent_decode(password.as_bytes())
-        .decode_utf8_lossy())
+    Some(percent_decode(password.as_bytes()).decode_utf8_lossy())
 }
 
 fn get_database_from_url(url: &Url) -> Result<Option<&str>> {
@@ -550,7 +657,7 @@ fn get_database_from_url(url: &Url) -> Result<Option<&str>> {
 }
 
 fn parse_duration(source: &str) -> std::result::Result<Duration, ()> {
-    let digits_count = source.chars().take_while(|c| c.is_digit(10)).count();
+    let digits_count = source.chars().take_while(|c| c.is_ascii_digit()).count();
 
     let left: String = source.chars().take(digits_count).collect();
     let right: String = source.chars().skip(digits_count).collect();
@@ -576,19 +683,6 @@ fn parse_opt_duration(source: &str) -> std::result::Result<Option<Duration>, ()>
     Ok(Some(duration))
 }
 
-fn parse_opt_u8(source: &str) -> std::result::Result<Option<u8>, ()> {
-    if source == "none" {
-        return Ok(None);
-    }
-
-    let duration: u8 = match source.parse() {
-        Ok(value) => value,
-        Err(_) => return Err(()),
-    };
-
-    Ok(Some(duration))
-}
-
 fn parse_compression(source: &str) -> std::result::Result<bool, ()> {
     match source {
         "none" => Ok(false),
@@ -600,7 +694,7 @@ fn parse_compression(source: &str) -> std::result::Result<bool, ()> {
 fn parse_hosts(source: &str) -> std::result::Result<Vec<Url>, ()> {
     let mut result = Vec::new();
     for host in source.split(',') {
-        match Url::from_str(&format!("tcp://{}", host)) {
+        match Url::from_str(&format!("tcp://{host}")) {
             Ok(url) => result.push(url),
             Err(_) => return Err(()),
         }
@@ -617,7 +711,8 @@ mod test {
         let source = "host2:9000,host3:9000";
         let expected = vec![
             Url::from_str("tcp://host2:9000").unwrap(),
-            Url::from_str("tcp://host3:9000").unwrap()];
+            Url::from_str("tcp://host3:9000").unwrap(),
+        ];
         let actual = parse_hosts(source).unwrap();
         assert_eq!(actual, expected)
     }
@@ -632,7 +727,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "_tls")]
     fn test_parse_secure_options() {
         let url = "tcp://username:password@host1:9001/database?ping_timeout=42ms&keepalive=99s&compression=lz4&connection_timeout=10s&secure=true&skip_verify=true";
         assert_eq!(
@@ -699,10 +794,107 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
-    fn test_parse_with_unknown_url() {
+    fn test_parse_with_unknown_setting() {
         let url = "tcp://localhost:9000/foo?bar=baz";
-        from_url(url).unwrap();
+        assert_eq!(
+            Options {
+                addr: Url::parse("tcp://localhost:9000").unwrap(),
+                database: "foo".into(),
+                settings: HashMap::from([(
+                    "bar".into(),
+                    SettingValue {
+                        value: SettingType::String("baz".into()),
+                        is_important: true,
+                    }
+                ),]),
+                ..Options::default()
+            },
+            from_url(url).unwrap(),
+        );
+        // TODO: try to run "SELECT 1" with it and got a failure
+    }
+
+    #[test]
+    fn test_with_setting() {
+        {
+            let opts = Options::from_str("tcp://localhost:9000")
+                .unwrap()
+                .with_setting("foo", "bar", true);
+            assert_eq!(
+                opts.settings,
+                HashMap::from([(
+                    "foo".into(),
+                    SettingValue {
+                        value: SettingType::String("bar".into()),
+                        is_important: true,
+                    }
+                )])
+            );
+        }
+
+        {
+            let opts = Options::from_str("tcp://localhost:9000")
+                .unwrap()
+                .with_setting("foo", "bar", false);
+            assert_eq!(
+                opts.settings,
+                HashMap::from([(
+                    "foo".into(),
+                    SettingValue {
+                        value: SettingType::String("bar".into()),
+                        is_important: false,
+                    }
+                )])
+            );
+        }
+
+        {
+            let opts = Options::from_str("tcp://localhost:9000")
+                .unwrap()
+                .with_setting("foo", 1, true);
+            assert_eq!(
+                opts.settings,
+                HashMap::from([(
+                    "foo".into(),
+                    SettingValue {
+                        value: SettingType::UInt64(1u64),
+                        is_important: true,
+                    }
+                )])
+            );
+        }
+
+        {
+            let opts = Options::from_str("tcp://localhost:9000")
+                .unwrap()
+                .with_setting("foo", true, true);
+            assert_eq!(
+                opts.settings,
+                HashMap::from([(
+                    "foo".into(),
+                    SettingValue {
+                        value: SettingType::Bool(true),
+                        is_important: true,
+                    }
+                )])
+            );
+        }
+
+        {
+            let opts = Options::from_str("tcp://localhost:9000")
+                .unwrap()
+                .with_setting("foo", 1., true);
+            assert_eq!(
+                opts.settings,
+                HashMap::from([(
+                    "foo".into(),
+                    SettingValue {
+                        value: SettingType::Float64(1.),
+                        is_important: true,
+                    }
+                )])
+            );
+        }
     }
 
     #[test]

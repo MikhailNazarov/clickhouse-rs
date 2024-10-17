@@ -1,4 +1,9 @@
-use std::{io, io::Read, mem, os::raw::{c_int, c_char}};
+use std::{
+    io,
+    io::Read,
+    mem,
+    os::raw::{c_char, c_int},
+};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clickhouse_rs_cityhash_sys::{city_hash_128, UInt128};
@@ -67,7 +72,7 @@ where
 
     let method: u8 = reader.read_scalar()?;
     if method != 0x82 {
-        let message: String = format!("unsupported compression method {}", method);
+        let message: String = format!("unsupported compression method {method}");
         return Err(raise_error(message));
     }
 
@@ -118,12 +123,12 @@ mod test {
 
     #[test]
     fn test_decompress() {
-        let expected = vec![
+        let expected = [
             1u8, 0, 2, 255, 255, 255, 255, 0, 1, 1, 1, 115, 6, 83, 116, 114, 105, 110, 103, 3, 97,
             98, 99,
         ];
 
-        let source = vec![
+        let source = [
             245_u8, 5, 222, 235, 225, 158, 59, 108, 225, 31, 65, 215, 66, 66, 36, 92, 130, 34, 0,
             0, 0, 23, 0, 0, 0, 240, 8, 1, 0, 2, 255, 255, 255, 255, 0, 1, 1, 1, 115, 6, 83, 116,
             114, 105, 110, 103, 3, 97, 98, 99,

@@ -21,13 +21,12 @@ use crate::{
     },
 };
 
-use self::chunk_iterator::ChunkIterator;
-pub(crate) use self::row::BlockRef;
 pub use self::{
     block_info::BlockInfo,
     builder::{RCons, RNil, RowBuilder},
     row::{Row, Rows},
 };
+pub(crate) use self::{chunk_iterator::ChunkIterator, row::BlockRef};
 
 mod block_info;
 mod builder;
@@ -35,7 +34,7 @@ mod chunk_iterator;
 mod compressed;
 mod row;
 
-const INSERT_BLOCK_SIZE: usize = 1_048_576;
+pub(crate) const INSERT_BLOCK_SIZE: usize = 1_048_576;
 
 const DEFAULT_CAPACITY: usize = 100;
 
@@ -64,11 +63,13 @@ sliceable! {
     u16: UInt16,
     u32: UInt32,
     u64: UInt64,
+    u128: UInt128,
 
     i8: Int8,
     i16: Int16,
     i32: Int32,
-    i64: Int64
+    i64: Int64,
+    i128: Int128
 }
 
 /// Represents Clickhouse Block
@@ -370,12 +371,10 @@ impl<K: ColumnType> Block<K> {
     pub(crate) fn send_data(&self, encoder: &mut Encoder, compress: bool) {
         encoder.uvarint(protocol::CLIENT_DATA);
         encoder.string(""); // temporary table
-        for chunk in self.chunks(INSERT_BLOCK_SIZE) {
-            chunk.write(encoder, compress);
-        }
+        self.write(encoder, compress);
     }
 
-    pub(crate) fn chunks(&self, n: usize) -> ChunkIterator<K> {
+    pub(crate) fn chunks(self, n: usize) -> ChunkIterator<K> {
         ChunkIterator::new(n, self)
     }
 }
@@ -428,15 +427,15 @@ fn print_line(
     center: char,
     right: &str,
 ) -> fmt::Result {
-    write!(f, "{}", left)?;
+    write!(f, "{left}")?;
     for (i, len) in lens.iter().enumerate() {
         if i != 0 {
-            write!(f, "{}", center)?;
+            write!(f, "{center}")?;
         }
 
         write!(f, "{:\u{2500}>width$}", "", width = len + 2)?;
     }
-    write!(f, "{}", right)
+    write!(f, "{right}")
 }
 
 fn text_cells<K: ColumnType>(data: &Column<K>) -> Vec<String> {
@@ -445,8 +444,8 @@ fn text_cells<K: ColumnType>(data: &Column<K>) -> Vec<String> {
 
 #[cfg(test)]
 mod test {
-    use crate::row;
     use super::*;
+    use crate::{row, types::column::datetime64::DEFAULT_TZ};
 
     #[test]
     fn test_write_default() {
@@ -477,7 +476,7 @@ mod test {
     fn test_decompress_block() {
         let expected = Block::<Simple>::new().column("s", vec!["abc"]);
 
-        let source = vec![
+        let source = [
             245_u8, 5, 222, 235, 225, 158, 59, 108, 225, 31, 65, 215, 66, 66, 36, 92, 130, 34, 0,
             0, 0, 23, 0, 0, 0, 240, 8, 1, 0, 2, 255, 255, 255, 255, 0, 1, 1, 1, 115, 6, 83, 116,
             114, 105, 110, 103, 3, 97, 98, 99,
@@ -493,7 +492,7 @@ mod test {
     fn test_read_empty_block() {
         let source = [1, 0, 2, 255, 255, 255, 255, 0, 0, 0];
         let mut cursor = Cursor::new(&source[..]);
-        match Block::<Simple>::load(&mut cursor, Tz::Zulu, false) {
+        match Block::<Simple>::load(&mut cursor, *DEFAULT_TZ, false) {
             Ok(block) => assert!(block.is_empty()),
             Err(_) => unreachable!(),
         }
@@ -569,7 +568,7 @@ mod test {
     #[test]
     fn test_chunks_of_empty_block() {
         let block = Block::default();
-        assert_eq!(1, block.chunks(100_500).count());
+        assert_eq!(1, block.clone().chunks(100_500).count());
         assert_eq!(Some(block.clone()), block.chunks(100_500).next());
     }
 
@@ -589,7 +588,7 @@ mod test {
         block.write(&mut encoder, false);
 
         let mut reader = Cursor::new(encoder.get_buffer_ref());
-        let rblock = Block::load(&mut reader, Tz::Zulu, false).unwrap();
+        let rblock = Block::load(&mut reader, *DEFAULT_TZ, false).unwrap();
 
         assert_eq!(block, rblock);
     }
@@ -598,9 +597,11 @@ mod test {
     fn test_insert_str_array() {
         let expected: Vec<String> = vec!["A".into(), "B".into()];
         let mut block = Block::new();
-        block.push(row! {
-              tags: expected.clone(),
-        }).unwrap();
+        block
+            .push(row! {
+                  tags: expected.clone(),
+            })
+            .unwrap();
 
         let actual: Vec<String> = block.get(0, 0).unwrap();
         assert_eq!(actual, expected);

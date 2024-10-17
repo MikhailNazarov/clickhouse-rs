@@ -1,17 +1,18 @@
-use chrono::prelude::*;
+use chrono::{prelude::*, Duration};
 use chrono_tz::Tz;
 use either::Either;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    net::{Ipv4Addr, Ipv6Addr},
+};
 
-use crate::types::{Enum16, Enum8};
 use crate::{
     errors::{Error, FromSqlError, Result},
     types::{
         column::datetime64::to_datetime,
         value::{decode_ipv4, decode_ipv6},
-        Decimal, SqlType, ValueRef,
+        Decimal, Enum16, Enum8, SqlType, ValueRef,
     },
 };
 
@@ -57,7 +58,7 @@ impl<'a> FromSql<'a> for Decimal {
 impl<'a> FromSql<'a> for Enum8 {
     fn from_sql(value: ValueRef<'a>) -> FromSqlResult<Self> {
         match value {
-            ValueRef::Enum8(_enum_values, v) => Ok(v),
+            ValueRef::Enum8(_enum_values, e) => Ok(e),
             _ => {
                 let from = SqlType::from(value.clone()).to_string();
 
@@ -73,7 +74,7 @@ impl<'a> FromSql<'a> for Enum8 {
 impl<'a> FromSql<'a> for Enum16 {
     fn from_sql(value: ValueRef<'a>) -> FromSqlResult<Self> {
         match value {
-            ValueRef::Enum16(_enum_values, v) => Ok(v),
+            ValueRef::Enum16(_enum_values, e) => Ok(e),
             _ => {
                 let from = SqlType::from(value.clone()).to_string();
 
@@ -183,8 +184,8 @@ macro_rules! from_sql_vec_impl {
                         ValueRef::Array($k, vs) => {
                             let f: fn(ValueRef<'a>) -> FromSqlResult<$t> = $f;
                             let mut result = Vec::with_capacity(vs.len());
-                            for v in vs.iter() {
-                                let value: $t = f(v.clone())?;
+                            for r in vs.iter() {
+                                let value: $t = f(r.clone())?;
                                 result.push(value);
                             }
                             Ok(result)
@@ -204,12 +205,14 @@ macro_rules! from_sql_vec_impl {
 }
 
 from_sql_vec_impl! {
-    &'a str: SqlType::String => |v| v.as_str(),
-    String: SqlType::String => |v| v.as_string(),
-    &'a [u8]: SqlType::String => |v| v.as_bytes(),
-    Vec<u8>: SqlType::String => |v| v.as_bytes().map(<[u8]>::to_vec),
-    Date<Tz>: SqlType::Date => |z| Ok(z.into()),
-    DateTime<Tz>: SqlType::DateTime(_) => |z| Ok(z.into())
+    &'a str: SqlType::String => |r| r.as_str(),
+    String: SqlType::String => |r| r.as_string(),
+    &'a [u8]: SqlType::String => |r| r.as_bytes(),
+    Vec<u8>: SqlType::String => |r| r.as_bytes().map(<[u8]>::to_vec),
+    NaiveDate: SqlType::Date => |r| Ok(r.into()),
+    DateTime<Tz>: SqlType::DateTime(_) => |r| Ok(r.into()),
+    Enum8: SqlType::Enum8(_) => |r| Ok(r.into()),
+    Enum16: SqlType::Enum16(_) => |r| Ok(r.into())
 }
 
 impl<'a> FromSql<'a> for Vec<u8> {
@@ -217,8 +220,8 @@ impl<'a> FromSql<'a> for Vec<u8> {
         match value {
             ValueRef::Array(SqlType::UInt8, vs) => {
                 let mut result = Vec::with_capacity(vs.len());
-                for v in vs.iter() {
-                    result.push(v.clone().into());
+                for r in vs.iter() {
+                    result.push(r.clone().into());
                 }
                 Ok(result)
             }
@@ -253,14 +256,18 @@ macro_rules! from_sql_vec_impl {
 }
 
 from_sql_vec_impl! {
+    bool: Bool,
+
     i8: Int8,
     i16: Int16,
     i32: Int32,
     i64: Int64,
+    i128: Int128,
 
     u16: UInt16,
     u32: UInt32,
     u64: UInt64,
+    u128: UInt128,
 
     f32: Float32,
     f64: Float64
@@ -290,18 +297,17 @@ where
     }
 }
 
-impl<'a> FromSql<'a> for Date<Tz> {
+impl<'a> FromSql<'a> for NaiveDate {
     fn from_sql(value: ValueRef<'a>) -> FromSqlResult<Self> {
         match value {
-            ValueRef::Date(v, tz) => {
-                let time = tz.timestamp(i64::from(v) * 24 * 3600, 0);
-                Ok(time.date())
-            }
+            ValueRef::Date(v) => NaiveDate::from_ymd_opt(1970, 1, 1)
+                .map(|unix_epoch| unix_epoch + Duration::days(v.into()))
+                .ok_or(Error::FromSql(FromSqlError::OutOfRange)),
             _ => {
                 let from = SqlType::from(value).to_string();
                 Err(Error::FromSql(FromSqlError::InvalidType {
                     src: from,
-                    dst: "Date<Tz>".into(),
+                    dst: "NaiveDate".into(),
                 }))
             }
         }
@@ -312,7 +318,7 @@ impl<'a> FromSql<'a> for DateTime<Tz> {
     fn from_sql(value: ValueRef<'a>) -> FromSqlResult<Self> {
         match value {
             ValueRef::DateTime(v, tz) => {
-                let time = tz.timestamp(i64::from(v), 0);
+                let time = tz.timestamp_opt(i64::from(v), 0).unwrap();
                 Ok(time)
             }
             ValueRef::DateTime64(v, params) => {
@@ -331,15 +337,19 @@ impl<'a> FromSql<'a> for DateTime<Tz> {
 }
 
 from_sql_impl! {
+    bool: Bool,
+
     u8: UInt8,
     u16: UInt16,
     u32: UInt32,
     u64: UInt64,
+    u128: UInt128,
 
     i8: Int8,
     i16: Int16,
     i32: Int32,
     i64: Int64,
+    i128: Int128,
 
     f32: Float32,
     f64: Float64
@@ -366,7 +376,7 @@ mod test {
             Ok(_) => panic!("should fail"),
             Err(e) => assert_eq!(
                 "From SQL error: `SqlType::UInt16 cannot be cast to u32.`".to_string(),
-                format!("{}", e)
+                format!("{e}")
             ),
         }
     }

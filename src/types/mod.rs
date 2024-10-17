@@ -6,7 +6,7 @@ use hostname::get;
 
 use lazy_static::lazy_static;
 
-use crate::errors::ServerError;
+use crate::{errors::ServerError, types::column::datetime64::DEFAULT_TZ};
 
 pub use self::{
     block::{Block, RCons, RNil, Row, RowBuilder, Rows},
@@ -15,6 +15,7 @@ pub use self::{
     enums::{Enum16, Enum8},
     from_sql::{FromSql, FromSqlResult},
     options::Options,
+    options::{SettingType, SettingValue},
     query::Query,
     query_result::QueryResult,
     value::Value,
@@ -30,7 +31,7 @@ pub(crate) use self::{
     unmarshal::Unmarshal,
 };
 
-pub(crate) mod column;
+pub mod column;
 mod marshal;
 mod stat_buffer;
 mod unmarshal;
@@ -55,6 +56,8 @@ pub(crate) struct Progress {
     pub rows: u64,
     pub bytes: u64,
     pub total_rows: u64,
+    pub written_rows: u64,
+    pub written_bytes: u64,
 }
 
 #[derive(Copy, Clone, Default, Debug, PartialEq)]
@@ -67,6 +70,12 @@ pub struct ProfileInfo {
     pub calculated_rows_before_limit: bool,
 }
 
+#[derive(Clone, Default, Debug, PartialEq)]
+pub(crate) struct TableColumns {
+    pub table_name: String,
+    pub columns: String,
+}
+
 #[derive(Clone, PartialEq)]
 pub(crate) struct ServerInfo {
     pub name: String,
@@ -74,14 +83,21 @@ pub(crate) struct ServerInfo {
     pub minor_version: u64,
     pub major_version: u64,
     pub timezone: Tz,
+    pub display_name: String,
+    pub patch_version: u64,
 }
 
 impl fmt::Debug for ServerInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {}.{}.{} ({:?})",
-            self.name, self.major_version, self.minor_version, self.revision, self.timezone
+            "{} {}.{}.{}.{} ({:?})",
+            self.name,
+            self.major_version,
+            self.minor_version,
+            self.revision,
+            self.patch_version,
+            self.timezone
         )
     }
 }
@@ -100,7 +116,9 @@ impl Default for ServerInfo {
             revision: 0,
             minor_version: 0,
             major_version: 0,
-            timezone: Tz::Zulu,
+            timezone: *DEFAULT_TZ,
+            display_name: "".into(),
+            patch_version: 0,
         }
     }
 }
@@ -130,6 +148,7 @@ pub(crate) enum Packet<S> {
     Pong(S),
     Progress(Progress),
     ProfileInfo(ProfileInfo),
+    TableColumns(TableColumns),
     Exception(ServerError),
     Block(Block),
     Eof(S),
@@ -138,12 +157,13 @@ pub(crate) enum Packet<S> {
 impl<S> fmt::Debug for Packet<S> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Packet::Hello(_, info) => write!(f, "Hello({:?})", info),
+            Packet::Hello(_, info) => write!(f, "Hello({info:?})"),
             Packet::Pong(_) => write!(f, "Pong"),
-            Packet::Progress(p) => write!(f, "Progress({:?})", p),
-            Packet::ProfileInfo(info) => write!(f, "ProfileInfo({:?})", info),
-            Packet::Exception(e) => write!(f, "Exception({:?})", e),
-            Packet::Block(b) => write!(f, "Block({:?})", b),
+            Packet::Progress(p) => write!(f, "Progress({p:?})"),
+            Packet::ProfileInfo(info) => write!(f, "ProfileInfo({info:?})"),
+            Packet::TableColumns(info) => write!(f, "TableColumns({info:?})"),
+            Packet::Exception(e) => write!(f, "Exception({e:?})"),
+            Packet::Block(b) => write!(f, "Block({b:?})"),
             Packet::Eof(_) => write!(f, "Eof"),
         }
     }
@@ -156,6 +176,7 @@ impl<S> Packet<S> {
             Packet::Pong(_) => Packet::Pong(transport.take().unwrap()),
             Packet::Progress(progress) => Packet::Progress(progress),
             Packet::ProfileInfo(profile_info) => Packet::ProfileInfo(profile_info),
+            Packet::TableColumns(table_columns) => Packet::TableColumns(table_columns),
             Packet::Exception(exception) => Packet::Exception(exception),
             Packet::Block(block) => Packet::Block(block),
             Packet::Eof(_) => Packet::Eof(transport.take().unwrap()),
@@ -180,22 +201,24 @@ macro_rules! has_sql_type {
 }
 
 has_sql_type! {
+    bool: SqlType::Bool,
     u8: SqlType::UInt8,
     u16: SqlType::UInt16,
     u32: SqlType::UInt32,
     u64: SqlType::UInt64,
+    u128: SqlType::UInt128,
     i8: SqlType::Int8,
     i16: SqlType::Int16,
     i32: SqlType::Int32,
     i64: SqlType::Int64,
+    i128: SqlType::Int128,
     &str: SqlType::String,
     String: SqlType::String,
     f32: SqlType::Float32,
     f64: SqlType::Float64,
-    Date<Tz>: SqlType::Date,
+    NaiveDate: SqlType::Date,
     DateTime<Tz>: SqlType::DateTime(DateTimeType::DateTime32)
 }
-
 
 impl<K, V> HasSqlType for HashMap<K, V>
 where
@@ -203,10 +226,7 @@ where
     V: HasSqlType,
 {
     fn get_sql_type() -> SqlType {
-        SqlType::Map(
-            K::get_sql_type().into(),
-            V::get_sql_type().into(),
-        )
+        SqlType::Map(K::get_sql_type().into(), V::get_sql_type().into())
     }
 }
 
@@ -288,14 +308,17 @@ impl FromStr for SimpleAggFunc {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum SqlType {
+    Bool,
     UInt8,
     UInt16,
     UInt32,
     UInt64,
+    UInt128,
     Int8,
     Int16,
     Int32,
     Int64,
+    Int128,
     String,
     FixedString(usize),
     Float32,
@@ -307,6 +330,7 @@ pub enum SqlType {
     Uuid,
     Nullable(&'static SqlType),
     Array(&'static SqlType),
+    LowCardinality(&'static SqlType),
     Decimal(u8, u8),
     Enum8(Vec<(String, i8)>),
     Enum16(Vec<(String, i16)>),
@@ -351,23 +375,45 @@ impl SqlType {
         matches!(self, SqlType::DateTime(_))
     }
 
+    pub(crate) fn is_inner_low_cardinality(&self) -> bool {
+        matches!(
+            self,
+            SqlType::String
+                | SqlType::FixedString(_)
+                | SqlType::Date
+                | SqlType::DateTime(_)
+                | SqlType::UInt8
+                | SqlType::UInt16
+                | SqlType::UInt32
+                | SqlType::UInt64
+                | SqlType::Int8
+                | SqlType::Int16
+                | SqlType::Int32
+                | SqlType::Int64
+        )
+    }
+
     pub fn to_string(&self) -> Cow<'static, str> {
         match self.clone() {
+            SqlType::Bool => "Bool".into(),
             SqlType::UInt8 => "UInt8".into(),
             SqlType::UInt16 => "UInt16".into(),
             SqlType::UInt32 => "UInt32".into(),
             SqlType::UInt64 => "UInt64".into(),
+            SqlType::UInt128 => "UInt128".into(),
             SqlType::Int8 => "Int8".into(),
             SqlType::Int16 => "Int16".into(),
             SqlType::Int32 => "Int32".into(),
             SqlType::Int64 => "Int64".into(),
+            SqlType::Int128 => "Int128".into(),
             SqlType::String => "String".into(),
-            SqlType::FixedString(str_len) => format!("FixedString({})", str_len).into(),
+            SqlType::FixedString(str_len) => format!("FixedString({str_len})").into(),
+            SqlType::LowCardinality(inner) => format!("LowCardinality({})", &inner).into(),
             SqlType::Float32 => "Float32".into(),
             SqlType::Float64 => "Float64".into(),
             SqlType::Date => "Date".into(),
             SqlType::DateTime(DateTimeType::DateTime64(precision, tz)) => {
-                format!("DateTime64({}, '{:?}')", precision, tz).into()
+                format!("DateTime64({precision}, '{tz:?}')").into()
             }
             SqlType::DateTime(_) => "DateTime".into(),
             SqlType::Ipv4 => "IPv4".into(),
@@ -379,20 +425,18 @@ impl SqlType {
                 format!("SimpleAggregateFunction({}, {})", func_str, &nested).into()
             }
             SqlType::Array(nested) => format!("Array({})", &nested).into(),
-            SqlType::Decimal(precision, scale) => {
-                format!("Decimal({}, {})", precision, scale).into()
-            }
+            SqlType::Decimal(precision, scale) => format!("Decimal({precision}, {scale})").into(),
             SqlType::Enum8(values) => {
                 let a: Vec<String> = values
                     .iter()
-                    .map(|(name, value)| format!("'{}' = {}", name, value))
+                    .map(|(name, value)| format!("'{name}' = {value}"))
                     .collect();
                 format!("Enum8({})", a.join(",")).into()
             }
             SqlType::Enum16(values) => {
                 let a: Vec<String> = values
                     .iter()
-                    .map(|(name, value)| format!("'{}' = {}", name, value))
+                    .map(|(name, value)| format!("'{name}' = {value}"))
                     .collect();
                 format!("Enum16({})", a.join(",")).into()
             }
@@ -405,6 +449,7 @@ impl SqlType {
             SqlType::Nullable(inner) => 1 + inner.level(),
             SqlType::Array(inner) => 1 + inner.level(),
             SqlType::Map(_, value) => 1 + value.level(),
+            SqlType::LowCardinality(_) => 1,
             _ => 0,
         }
     }

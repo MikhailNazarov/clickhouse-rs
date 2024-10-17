@@ -1,16 +1,23 @@
-use chrono::prelude::*;
+use chrono::{prelude::*, LocalResult};
 use chrono_tz::Tz;
+use lazy_static::lazy_static;
 
 use crate::{
     binary::{Encoder, ReadEx},
     errors::Result,
     types::{
-        SqlType, DateTimeType, Value, ValueRef,
         column::{
-            column_data::{BoxColumnData, ColumnData}, list::List,
-        }
+            column_data::{BoxColumnData, ColumnData},
+            date::DateTimeInternals,
+            list::List,
+        },
+        DateTimeType, SqlType, Value, ValueRef,
     },
 };
+
+lazy_static! {
+    pub(crate) static ref DEFAULT_TZ: Tz = Tz::Zulu;
+}
 
 pub struct DateTime64ColumnData {
     data: List<i64>,
@@ -76,7 +83,12 @@ impl ColumnData for DateTime64ColumnData {
         })
     }
 
-    unsafe fn get_internal(&self, pointers: &[*mut *const u8], level: u8, _props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        pointers: &[*mut *const u8],
+        level: u8,
+        _props: u32,
+    ) -> Result<()> {
         assert_eq!(level, 0);
         let (precision, tz) = &self.params;
         *pointers[0] = self.data.as_ptr() as *const u8;
@@ -85,16 +97,38 @@ impl ColumnData for DateTime64ColumnData {
         *(pointers[3] as *mut Option<u32>) = Some(*precision);
         Ok(())
     }
+
+    unsafe fn get_internals(&self, data_ptr: *mut (), _level: u8, _props: u32) -> Result<()> {
+        let (precision, tz) = &self.params;
+        unsafe {
+            let data_ref = &mut *(data_ptr as *mut DateTimeInternals);
+            data_ref.begin = self.data.as_ptr().cast();
+            data_ref.len = self.data.len();
+            data_ref.tz = *tz;
+            data_ref.precision = Some(*precision);
+            Ok(())
+        }
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        let (_, tz) = self.params;
+        Some(tz)
+    }
 }
 
-pub(crate) fn from_datetime<T: chrono::offset::TimeZone>(time: DateTime<T>, precision: u32) -> i64 {
+pub(crate) fn from_datetime<T: TimeZone>(time: DateTime<T>, precision: u32) -> i64 {
     let base10: i64 = 10;
-    let timestamp = time.timestamp_nanos();
+    let timestamp = time.timestamp_nanos_opt().unwrap();
     timestamp / base10.pow(9 - precision)
 }
 
 #[inline(always)]
 pub(crate) fn to_datetime(value: i64, precision: u32, tz: Tz) -> DateTime<Tz> {
+    to_datetime_opt(value, precision, tz).unwrap()
+}
+
+#[inline(always)]
+pub(crate) fn to_datetime_opt(value: i64, precision: u32, tz: Tz) -> LocalResult<DateTime<Tz>> {
     let base10: i64 = 10;
 
     let nano = if precision < 19 {
@@ -106,7 +140,23 @@ pub(crate) fn to_datetime(value: i64, precision: u32, tz: Tz) -> DateTime<Tz> {
     let sec = nano / 1_000_000_000;
     let nsec = nano - sec * 1_000_000_000;
 
-    tz.timestamp(sec, nsec as u32)
+    tz.timestamp_opt(sec, nsec as u32)
+}
+
+#[inline(always)]
+pub(crate) fn to_native_datetime_opt(value: i64, precision: u32) -> Option<NaiveDateTime> {
+    let base10: i64 = 10;
+
+    let nano = if precision < 19 {
+        value * base10.pow(9 - precision)
+    } else {
+        0_i64
+    };
+
+    let sec = nano / 1_000_000_000;
+    let nsec = nano - sec * 1_000_000_000;
+
+    NaiveDateTime::from_timestamp_opt(sec, nsec as u32)
 }
 
 #[cfg(test)]

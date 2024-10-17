@@ -23,6 +23,7 @@ use crate::{
             fixed_string::FixedStringColumnData,
             ip::{IpColumnData, Ipv4, Ipv6, Uuid},
             list::List,
+            low_cardinality::LowCardinalityColumnData,
             map::MapColumnData,
             nullable::NullableColumnData,
             numeric::VectorColumnData,
@@ -61,14 +62,17 @@ impl dyn ColumnData {
         tz: Tz,
     ) -> Result<W::Wrapper> {
         Ok(match_str!(type_name, {
+            "Bool" => W::wrap(VectorColumnData::<bool>::load(reader, size)?),
             "UInt8" => W::wrap(VectorColumnData::<u8>::load(reader, size)?),
             "UInt16" => W::wrap(VectorColumnData::<u16>::load(reader, size)?),
             "UInt32" => W::wrap(VectorColumnData::<u32>::load(reader, size)?),
             "UInt64" => W::wrap(VectorColumnData::<u64>::load(reader, size)?),
+            "UInt128" => W::wrap(VectorColumnData::<u128>::load(reader, size)?),
             "Int8" | "TinyInt" => W::wrap(VectorColumnData::<i8>::load(reader, size)?),
             "Int16" | "SmallInt" => W::wrap(VectorColumnData::<i16>::load(reader, size)?),
             "Int32" | "Int" | "Integer" => W::wrap(VectorColumnData::<i32>::load(reader, size)?),
             "Int64" | "BigInt" => W::wrap(VectorColumnData::<i64>::load(reader, size)?),
+            "Int128" => W::wrap(VectorColumnData::<i128>::load(reader, size)?),
             "Float32" | "Float" => W::wrap(VectorColumnData::<f32>::load(reader, size)?),
             "Float64" | "Double" => W::wrap(VectorColumnData::<f64>::load(reader, size)?),
             "String" | "Char" | "Varchar" | "Text" | "TinyText" | "MediumText" | "LongText" | "Blob" | "TinyBlob" | "MediumBlob" | "LongBlob" => W::wrap(StringColumnData::load(reader, size)?),
@@ -101,8 +105,10 @@ impl dyn ColumnData {
                     W::wrap(DateTime64ColumnData::load(reader, size, precision, column_timezone)?)
                 } else if let Some((func, inner_type)) = parse_simple_agg_fun(type_name) {
                     W::wrap(SimpleAggregateFunctionColumnData::load(reader, func, inner_type, size, tz)?)
+                } else if let Some(inner_type) = parse_low_cardinality(type_name) {
+                    W::wrap(LowCardinalityColumnData::load(reader, inner_type, size, tz)?)
                 } else {
-                    let message = format!("Unsupported column type \"{}\".", type_name);
+                    let message = format!("Unsupported column type \"{type_name}\".");
                     return Err(message.into());
                 }
             }
@@ -115,14 +121,17 @@ impl dyn ColumnData {
         capacity: usize,
     ) -> Result<W::Wrapper> {
         Ok(match sql_type {
+            SqlType::Bool => W::wrap(VectorColumnData::<bool>::with_capacity(capacity)),
             SqlType::UInt8 => W::wrap(VectorColumnData::<u8>::with_capacity(capacity)),
             SqlType::UInt16 => W::wrap(VectorColumnData::<u16>::with_capacity(capacity)),
             SqlType::UInt32 => W::wrap(VectorColumnData::<u32>::with_capacity(capacity)),
             SqlType::UInt64 => W::wrap(VectorColumnData::<u64>::with_capacity(capacity)),
+            SqlType::UInt128 => W::wrap(VectorColumnData::<u128>::with_capacity(capacity)),
             SqlType::Int8 => W::wrap(VectorColumnData::<i8>::with_capacity(capacity)),
             SqlType::Int16 => W::wrap(VectorColumnData::<i16>::with_capacity(capacity)),
             SqlType::Int32 => W::wrap(VectorColumnData::<i32>::with_capacity(capacity)),
             SqlType::Int64 => W::wrap(VectorColumnData::<i64>::with_capacity(capacity)),
+            SqlType::Int128 => W::wrap(VectorColumnData::<i128>::with_capacity(capacity)),
             SqlType::String => W::wrap(StringColumnData::with_capacity(capacity)),
             SqlType::FixedString(len) => {
                 W::wrap(FixedStringColumnData::with_capacity(capacity, len))
@@ -202,18 +211,33 @@ impl dyn ColumnData {
             }),
             SqlType::Map(k, v) => W::wrap(MapColumnData {
                 keys: <dyn ColumnData>::from_type::<ArcColumnWrapper>(
-                    k.clone().into(),
+                    k.clone(),
                     timezone,
                     capacity,
                 )?,
                 offsets: List::with_capacity(capacity),
                 values: <dyn ColumnData>::from_type::<ArcColumnWrapper>(
-                    v.clone().into(),
+                    v.clone(),
                     timezone,
                     capacity,
                 )?,
                 size: 0,
             }),
+            SqlType::LowCardinality(inner) => {
+                W::wrap(
+                    LowCardinalityColumnData::empty(inner, timezone, capacity)?, // LowCardinalityColumnData {
+                                                                                 //     inner: <dyn ColumnData>::from_type::<ArcColumnWrapper>(
+                                                                                 //         inner.clone(),
+                                                                                 //         timezone,
+                                                                                 //         capacity
+                                                                                 //     )?,
+                                                                                 //     index: Index::UInt8(
+                                                                                 //         VectorColumnData::<u8>::with_capacity(capacity)
+                                                                                 //     ),
+                                                                                 //     value_map: None,
+                                                                                 // }
+                )
+            }
         })
     }
 }
@@ -492,6 +516,29 @@ fn parse_date_time64(source: &str) -> Option<(u32, Option<String>)> {
     }
 }
 
+fn parse_low_cardinality(source: &str) -> Option<&str> {
+    if !source.starts_with("LowCardinality") {
+        return None;
+    }
+
+    let mut lo = 14;
+    let mut hi = source.len() - 1;
+
+    while lo < source.len() && &source[lo..lo + 1] != "(" {
+        lo += 1;
+    }
+
+    while hi > lo && &source[hi..hi + 1] != ")" {
+        hi -= 1;
+    }
+
+    if lo >= hi {
+        return None;
+    }
+
+    Some(source[lo + 1..hi].trim())
+}
+
 fn get_timezone(timezone: &Option<String>, tz: Tz) -> Result<Tz> {
     match timezone {
         None => Ok(tz),
@@ -717,5 +764,13 @@ mod test {
         let actual = parse_map_type(s);
         let expected = Some(("UInt8", "Map(UInt8,UInt8)"));
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_parse_low_cardinality() {
+        assert_eq!(
+            parse_low_cardinality("LowCardinality ( String )"),
+            Some("String")
+        );
     }
 }

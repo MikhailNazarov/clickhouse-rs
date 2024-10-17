@@ -22,12 +22,13 @@ clickhouse-rs = "*"
 * Decimal(P, S)
 * Float32, Float64
 * String, FixedString(N)
-* UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64
+* UInt8, UInt16, UInt32, UInt64, UInt128, Int8, Int16, Int32, Int64, Int128
 * Nullable(T)
 * Array(UInt/Int/Float/String/Date/DateTime)
 * SimpleAggregateFunction(F, T)
 * IPv4/IPv6
 * UUID
+* Bool
 
 ## DNS
 
@@ -40,11 +41,6 @@ parameters:
 - `compression` - Whether or not use compression (defaults to `none`). Possible choices:
     * `none`
     * `lz4`
-
-- `readonly` - Restricts permissions for read data, write data and change settings queries. (defaults to `none`). Possible choices:
-    * `0` - All queries are allowed.
-    * `1` - Only read data queries are allowed.
-    * `2` - Read data and change settings queries are allowed.
 
 - `connection_timeout` - Timeout for connection (defaults to `500 ms`)
 - `query_timeout` - Timeout for queries (defaults to `180 sec`).

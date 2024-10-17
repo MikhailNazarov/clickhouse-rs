@@ -1,11 +1,16 @@
+use chrono_tz::Tz;
 use std::cmp;
 
 use crate::{
     binary::{Encoder, ReadEx},
     errors::Result,
     types::{
-        column::column_data::BoxColumnData, from_sql::*, Column, SqlType, Value,
-        ValueRef, ColumnType
+        column::{
+            column_data::{BoxColumnData, LowCardinalityAccessor},
+            util::extract_nulls_and_values,
+        },
+        value::get_str_buffer,
+        Column, ColumnType, SqlType, Value, ValueRef,
     },
 };
 
@@ -47,6 +52,13 @@ impl FixedStringColumnData {
     }
 }
 
+impl LowCardinalityAccessor for FixedStringColumnData {
+    fn get_string(&self, index: usize) -> &[u8] {
+        let shift = index * self.str_len;
+        &self.buffer[shift..shift + self.str_len]
+    }
+}
+
 impl ColumnData for FixedStringColumnData {
     fn sql_type(&self) -> SqlType {
         SqlType::FixedString(self.str_len)
@@ -63,11 +75,11 @@ impl ColumnData for FixedStringColumnData {
     }
 
     fn push(&mut self, value: Value) {
-        let bs: String = String::from(value);
+        let bs = get_str_buffer(&value);
         let l = cmp::min(bs.len(), self.str_len);
         let old_len = self.buffer.len();
-        self.buffer.extend_from_slice(&bs.as_bytes()[0..l]);
-        self.buffer.resize(old_len + (self.str_len - l), 0_u8);
+        self.buffer.extend(bs.iter().take(l));
+        self.buffer.resize(old_len + self.str_len, 0_u8);
     }
 
     fn at(&self, index: usize) -> ValueRef {
@@ -83,11 +95,24 @@ impl ColumnData for FixedStringColumnData {
         })
     }
 
-    unsafe fn get_internal(&self, pointers: &[*mut *const u8], level: u8, _props: u32) -> Result<()> {
+    unsafe fn get_internal(
+        &self,
+        pointers: &[*mut *const u8],
+        level: u8,
+        _props: u32,
+    ) -> Result<()> {
         assert_eq!(level, 0);
-        *pointers[0] = self.buffer.as_ptr() as *const u8;
+        *pointers[0] = self.buffer.as_ptr();
         *(pointers[1] as *mut usize) = self.len();
         Ok(())
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        None
+    }
+
+    fn get_low_cardinality_accessor(&self) -> Option<&dyn LowCardinalityAccessor> {
+        Some(self)
     }
 }
 
@@ -136,6 +161,10 @@ impl<K: ColumnType> ColumnData for FixedStringAdapter<K> {
     fn clone_instance(&self) -> BoxColumnData {
         unimplemented!()
     }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        None
+    }
 }
 
 impl<K: ColumnType> ColumnData for NullableFixedStringAdapter<K> {
@@ -144,17 +173,7 @@ impl<K: ColumnType> ColumnData for NullableFixedStringAdapter<K> {
     }
 
     fn save(&self, encoder: &mut Encoder, start: usize, end: usize) {
-        let size = end - start;
-        let mut nulls = vec![0; size];
-        let mut values: Vec<Option<&[u8]>> = vec![None; size];
-
-        for (i, index) in (start..end).enumerate() {
-            values[i] = Option::from_sql(self.at(index)).unwrap();
-            if values[i].is_none() {
-                nulls[i] = 1;
-            }
-        }
-
+        let (nulls, values) = extract_nulls_and_values::<&[u8], Self>(self, start, end).unwrap();
         encoder.write_bytes(nulls.as_ref());
 
         let mut buffer = Vec::with_capacity(self.str_len);
@@ -182,5 +201,9 @@ impl<K: ColumnType> ColumnData for NullableFixedStringAdapter<K> {
 
     fn clone_instance(&self) -> BoxColumnData {
         unimplemented!()
+    }
+
+    fn get_timezone(&self) -> Option<Tz> {
+        None
     }
 }

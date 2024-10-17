@@ -1,17 +1,18 @@
 use std::{
-    fmt, mem, pin::Pin,
-    sync::Arc,
+    fmt, mem,
+    pin::Pin,
     sync::atomic::{self, Ordering},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
 use futures_util::future::BoxFuture;
-use log::error;
+use log::{error, warn};
 
 use crate::{
-    Client,
-    ClientHandle,
-    errors::Result, types::{IntoOptions, OptionsSource},
+    errors::Result,
+    types::{IntoOptions, OptionsSource},
+    Client, ClientHandle,
 };
 
 pub use self::futures::GetHandle;
@@ -148,6 +149,15 @@ impl Pool {
             Err(err) => error!("{}", err),
         }
 
+        for host in &hosts {
+            if host.port() == Some(8123) {
+                warn!(
+                    "The attempt to establish a connection through the text protocol. clickhouse-rs is for using the binary protocol."
+                );
+                break;
+            }
+        }
+
         let inner = Arc::new(Inner {
             new: crossbeam::queue::ArrayQueue::new(1),
             idle: crossbeam::queue::ArrayQueue::new(max),
@@ -215,16 +225,16 @@ impl Pool {
             match new.poll_unpin(cx) {
                 Poll::Ready(Ok(client)) => {
                     self.inner.idle.push(client).unwrap();
-                },
+                }
                 Poll::Pending => {
                     // NOTE: it is okay to drop the construction task
                     // because another construction will be attempted
                     // later in Pool::poll
                     let _ = self.inner.new.push(new);
-                },
+                }
                 Poll::Ready(Err(err)) => {
                     return Err(err);
-                },
+                }
             }
         }
 
@@ -249,7 +259,7 @@ impl Pool {
         client.pool = PoolBinding::None;
         client.set_inside(true);
 
-        if self.inner.idle.len() < min && is_attached {
+        if self.inner.idle.len() < min && is_attached && client.inner.is_some() {
             let _ = self.inner.idle.push(client);
         }
         self.inner.ongoing.fetch_sub(1, Ordering::AcqRel);
@@ -295,7 +305,7 @@ mod test {
 
     use futures_util::future;
 
-    use crate::{Block, errors::Result, Options, test_misc::DATABASE_URL};
+    use crate::{errors::Result, test_misc::DATABASE_URL, Block, Options};
 
     use super::Pool;
     use url::Url;
@@ -368,6 +378,9 @@ mod test {
         let spent = start.elapsed();
 
         assert!(spent >= Duration::from_millis(2000));
+        #[cfg(feature = "_tls")]
+        assert!(spent < Duration::from_millis(5000)); // slow connect
+        #[cfg(not(feature = "_tls"))]
         assert!(spent < Duration::from_millis(2500));
 
         assert_eq!(pool.info().idle_len, 6);
@@ -405,7 +418,8 @@ mod test {
 
     #[test]
     fn test_get_addr() {
-        let options = Options::from_str("tcp://host1:9000?alt_hosts=host2:9000,host3:9000").unwrap();
+        let options =
+            Options::from_str("tcp://host1:9000?alt_hosts=host2:9000,host3:9000").unwrap();
         let pool = Pool::new(options);
 
         assert_eq!(pool.get_addr(), &Url::from_str("tcp://host1:9000").unwrap());
