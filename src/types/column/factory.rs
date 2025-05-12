@@ -542,7 +542,9 @@ fn parse_low_cardinality(source: &str) -> Option<&str> {
 fn get_timezone(timezone: &Option<String>, tz: Tz) -> Result<Tz> {
     match timezone {
         None => Ok(tz),
-        Some(t) => Ok(t.parse()?),
+        Some(t) => Ok(t
+            .parse()
+            .map_err(|e: chrono_tz::ParseError| crate::Error::Other(e.to_string().into()))?),
     }
 }
 
