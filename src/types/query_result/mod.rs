@@ -94,7 +94,7 @@ impl<'a> QueryResult<'a> {
 
         self.client
             .wrap_stream::<'a, _>(move |c: &'a mut ClientHandle| {
-                info!("[send query] {}", query.get_sql());
+                info!("[send query] id={} sql={}", query.get_id(), query.get_sql());
                 c.pool.detach();
 
                 let context = c.context.clone();
