@@ -25,6 +25,12 @@ pub struct QueryResult<'a> {
 }
 
 impl<'a> QueryResult<'a> {
+    /// Установить query_id для отслеживания запроса в system.query_log
+    pub fn id(mut self, id: impl AsRef<str>) -> Self {
+        self.query = self.query.id(id);
+        self
+    }
+
     /// Fetch data from table. It returns a block that contains all rows.
     pub async fn fetch_all(self) -> Result<Block<Complex>> {
         let timeout = try_opt!(self.client.context.options.get()).query_timeout;
